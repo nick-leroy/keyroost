@@ -491,7 +491,7 @@ repository and are not part of its test suite.
 | [Sign, decipher and authenticate](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L622) | Each private-key operation checks `pw1.isValidated()` and its required mode. The existing tests cover wrong/missing mode; additional simulator probes found no bypass after a failed PW1 check, card reset, or PW1 replacement. | This is a source/simulator result, not a claim about every command sequence or the installed binary. |
 | [Admin operations](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L963) | Key generation, PUT DATA, key import and retry-setting have PW3 checks; tested unauthorized calls were denied in the simulator. | Continue checking edge cases inside authenticated key import and reset paths. |
 | [Command chaining](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L429) | The intermediate-header check rejects a mismatch only when **both** INS and P1/P2 differ. A simulated chain with the same INS but changed P1/P2 was accepted; the final unauthorized PUT DATA was still denied by PW3. | A protocol-validation discrepancy is reproduced; no privilege bypass or security impact is established. |
-| [Secure-messaging encryption key](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPSecureMessaging.java#L167) | `PUT DATA D1` passes the start of the supplied key to `setSessionKeyEncryption`, but that method loads `offset + 16`; the `F4` container path also calls this setter. JCardSim tests loaded the second 16 bytes. The connected NEO subsequently produced a protected response decryptable with bytes 16–31 of an earlier public `006E` response, but not with the supplied D1 key. | The D1 key-offset behavior is confirmed on this physical NEO. No PIN bypass, firmware read, real-client exposure, or cross-session persistence has been demonstrated. |
+| [Secure-messaging encryption key](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPSecureMessaging.java#L167) | `PUT DATA D1` passes the start of the supplied key to `setSessionKeyEncryption`, but that method loads `offset + 16`; the `F4` container path also calls this setter. JCardSim tests loaded the second 16 bytes. The connected NEO produced protected responses decryptable with the predicted public-buffer bytes after D1, and with bytes spanning the adjacent `D2` field after F4; neither response decrypted with the supplied ENC key. | Both key-offset behaviors are confirmed on this physical NEO. No PIN bypass, firmware read, real-client exposure, or cross-session persistence has been demonstrated. |
 
 A read-only `GET DATA 006E` on the connected NEO returned `9000`; its extended
 capabilities advertised secure messaging (`C0` first byte `F0`, algorithm byte
@@ -537,13 +537,13 @@ client later uses SM while that publicly derived encryption key is active.
 The later hardware test below reproduced this sequence on the connected NEO.
 
 The [`F4` SM key container](https://www.gnupg.org/ftp/specs/OpenPGP-smart-card-application-2.1.pdf)
-has a separate deterministic version of the offset error in the simulator. In
+has a separate deterministic version of the offset error. In
 this source's 16-byte key layout, for
 `D1 10 <16 ENC bytes> D2 10 <16 MAC bytes>`, the encryption setter loads the
 16 bytes beginning at the `D2` tag, namely `D2 10` plus the first 14 MAC-key
 bytes, rather than the supplied ENC key. The MAC setter loads the intended MAC
-key. This confirms a key-field mix-up in the public source; it does not show a
-useful attack on a physical NEO.
+key. The later hardware test reproduced this mapping, though real-client use
+and confidentiality impact remain unproven.
 
 A scan of GnuPG's current `scd` source at
 [`35549cea`](https://github.com/gpg/gnupg/tree/35549cea95638d87e1c6f2b25fe1ce6395d52d58/scd)
@@ -589,15 +589,31 @@ decryption with the supplied D1 key did not. This is direct evidence that this
 physical NEO used the public-buffer bytes as its SM response-encryption key in
 the tested sequence.
 
-The probe then submitted all-zero 16-byte D1 and D2 values to clear the test
-session keys; both commands returned `9000`. `GET DATA C4` still reported
+A separate authenticated `PUT DATA F4` submitted
+`D1 10 <test ENC> D2 10 <test MAC>` with distinct 16-byte test keys. The write
+returned `9000`. Following `GET CHALLENGE`, a protected `GET DATA 004F`
+returned `9000` with a valid response MAC under the supplied MAC key. Its
+24-byte ciphertext decrypted with `D2 10` plus the first 14 MAC-key bytes, not
+with the supplied ENC key. Thus the same physical NEO also reproduces the
+source's adjacent-field key mix-up through F4.
+
+Each probe then submitted all-zero 16-byte D1 and D2 values to clear its test
+session keys; all cleanup commands returned `9000`. `GET DATA C4` still reported
 PW1/reset-code/PW3 retries `(3, 3, 3)`. No OpenPGP credential was generated,
 imported, reset, or deleted. Preexisting transient SM key values, if any,
 could not be recovered before the test. The test does not establish that a real
 client uses this provisioning sequence, that sensitive traffic was exposed,
-that the keys survive applet deselection, or that `F4` behaves the same way on
-hardware. Those are distinct follow-ups. The result gives neither a PIN bypass
-nor a controller or secure-element firmware read path.
+or that the keys survive applet deselection. Those are distinct follow-ups. The
+result gives neither a PIN bypass nor a controller or secure-element firmware
+read path.
+
+**Next security questions, in order:** (1) inspect actual OpenPGP SM clients
+and provisioning sequences for D1/F4 use, then reproduce a sensitive-response
+case on a throwaway credential if one exists; (2) measure key and buffer
+lifetime across applet deselection and power loss; (3) assess whether the
+malformed-length exceptions or partially completed RSA imports affect
+integrity or availability on a spare key. The current evidence does not make
+an out-of-bounds exception into arbitrary memory access or a firmware dump.
 
 ### Retry counters and memory-safety audit (2026-10-29)
 
