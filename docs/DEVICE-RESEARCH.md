@@ -516,6 +516,18 @@ positions 16–31, not the 16 bytes supplied in D1. Thus the source-level
 misassignment can be steered by an earlier APDU **within one selected applet
 session**. D1 still requires valid PW3; this does not show a PIN bypass.
 
+A further JCardSim test completed an SM-protected `GET DATA 004F` exchange after
+that sequence. It set a separate test MAC key with admin-authorized `PUT DATA
+D2`, obtained an eight-byte send-sequence counter through `GET CHALLENGE`, and
+sent a correctly MACed SM command. The response decrypted to the ordinary
+`GET DATA 004F` value with the earlier APDU's chosen buffer-tail key (`0x22`
+bytes), while the D1-supplied key (`0x11` bytes) did not decrypt it. This moves
+the simulator evidence beyond key-object inspection: the wrong key affects
+response encryption in the public applet source. Both keys and the admin PIN in
+this test were simulator-only fixtures. It does not establish behavior of the
+installed NEO applet or show that an attacker can interpose an APDU during a
+real administrator's provisioning session.
+
 The source creates the APDU buffer with `JCSystem.CLEAR_ON_DESELECT` and the DES
 keys with `KeyBuilder.TYPE_DES_TRANSIENT_DESELECT`. [Oracle's Java Card API](https://docs.oracle.com/en/java/javacard/3.1/jc_api_srvc/api_classic/javacard/framework/JCSystem.html)
 and [KeyBuilder documentation](https://docs.oracle.com/en/java/javacard/3.1/jc_api_srvc/api_classic/javacard/security/KeyBuilder.html)
@@ -529,9 +541,10 @@ OpenPGP credentials, authenticate PW3, provision a test SM encryption key, and
 compare a known SM response against the supplied key and the predicted buffer
 tail. Keep all APDUs in one controlled card session, then reselect and check
 whether the effect disappears. This would distinguish a real-device key
-misassignment from a simulator-only artifact. It must also show a completed SM
-exchange and a concrete confidentiality or integrity consequence before being
-called a security vulnerability. No such test was run on the connected key.
+misassignment from a simulator-only artifact. A real-device security claim also
+needs a plausible way for an adversary to influence the preceding APDU in an
+administrator's provisioning session and a concrete confidentiality or
+integrity consequence. No such test was run on the connected key.
 
 ### Controller debug pin targets (data sheet only)
 
