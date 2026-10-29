@@ -554,6 +554,14 @@ and SM capability reporting, but no OpenPGP SM command-wrapping path. Keyroost's
 OpenPGP client likewise has no SM implementation. This is a source-scan limit
 on ordinary-client exposure, not evidence that no other client uses SM.
 
+Yubico's [NEO OpenPGP advisory](https://developers.yubico.com/ykneo-openpgp/SecurityAdvisory%202015-04-14.html)
+identifies NFC physical proximity as a way to reach the applet for a different,
+older issue; [OpenKeychain lists NEO NFC support](https://github.com/open-keychain/open-keychain/wiki/Security-Tokens).
+These sources establish a contactless OpenPGP surface, not that this key has SM
+keys provisioned or that an NFC client uses the affected SM path. OpenKeychain's
+documented [SM support for SmartPGP](https://github.com/github-af/SmartPGP)
+uses that separate applet and cannot be treated as NEO SM support.
+
 The source creates the APDU buffer with `JCSystem.CLEAR_ON_DESELECT` and the DES
 keys with `KeyBuilder.TYPE_DES_TRANSIENT_DESELECT`. [Oracle's Java Card API](https://docs.oracle.com/en/java/javacard/3.1/jc_api_srvc/api_classic/javacard/framework/JCSystem.html)
 and [KeyBuilder documentation](https://docs.oracle.com/en/java/javacard/3.1/jc_api_srvc/api_classic/javacard/security/KeyBuilder.html)
