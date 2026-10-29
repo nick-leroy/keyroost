@@ -2736,6 +2736,81 @@ fn job_waits_for_touch(label: &str) -> bool {
 /// when a job starts and when the last one ends.
 static KEY_WANTS_TOUCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// A job's busy label as an activity-log line: up to the ellipsis, dash or
+/// parenthesis that starts its "touch the key" hint, so "Reading OATH
+/// codes…" logs as "Reading OATH codes".
+fn job_log_text(label: &str) -> String {
+    let end = ["\u{2026}", " \u{2014} ", " ("]
+        .iter()
+        .filter_map(|cut| label.find(cut))
+        .min()
+        .unwrap_or(label.len());
+    let text = label[..end].trim();
+    // Labels that are an instruction log as what the job did.
+    match text {
+        "Touch your key to read the code" => "Reading code".to_string(),
+        "Touch the fingerprint sensor" => "Unlocking with a fingerprint".to_string(),
+        _ => text.to_string(),
+    }
+}
+
+/// The activity-log line for a failed Authenticator operation, or `None`.
+/// A rejected password is only an error when a password was sent: opening
+/// the tab on a protected key with nothing typed yet just shows the lock.
+fn oath_failure_line(e: &TransportError, password_sent: bool) -> Option<String> {
+    match e {
+        TransportError::OathPasswordRejected if !password_sent => None,
+        TransportError::OathPasswordRejected => Some("Authenticator: wrong password".into()),
+        e => Some(format!("Authenticator: {e}")),
+    }
+}
+
+/// `text` with the person's home folder shown as `~` (see
+/// [`with_home_as_tilde`]), for log lines that may be pasted into a bug report.
+fn without_home(text: &str) -> String {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
+    match home.as_ref().and_then(|h| h.to_str()) {
+        Some(h) => with_home_as_tilde(text, h),
+        None => text.to_string(),
+    }
+}
+
+/// `text` with every whole-path occurrence of `home` replaced by `~`: where
+/// the character before it doesn't continue a path name and the next one
+/// ends that path part, so a home of `/home/al` leaves `/home/alice` alone
+/// and a home of `/root` leaves `/srv/root/x` alone. A home of `/` (or
+/// empty) changes nothing.
+fn with_home_as_tilde(text: &str, home: &str) -> String {
+    let home = home.trim_end_matches(['/', '\\']);
+    if home.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(home) {
+        let after = &rest[at + home.len()..];
+        // Fails closed: the home starts a path unless the character before
+        // it continues a path name (a letter, digit, `.`, `-`, `_` or a
+        // separator), so a delimiter nobody listed can't leak the folder.
+        // A separator that ends a `file://` or `\\?\` prefix starts one.
+        let lead = &rest[..at];
+        let prev = lead.chars().last().or_else(|| out.chars().last());
+        let continues = |c: char| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '/' | '\\');
+        let starts = prev.is_none_or(|c| !continues(c))
+            || lead.ends_with("file://")
+            || lead.ends_with(r"\\?\");
+        let ends = after
+            .chars()
+            .next()
+            .is_none_or(|c| matches!(c, '/' | '\\' | ' ' | '"' | '\'' | ')' | ',' | ';' | ':'));
+        out.push_str(&rest[..at]);
+        out.push_str(if starts && ends { "~" } else { home });
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The busy label for deleting an Authenticator account: it asks for a touch
 /// when the applet wants one for every delete (a Nitrokey 3) or the account
 /// requires one.
@@ -5130,6 +5205,22 @@ impl App {
     where
         F: FnOnce() -> ApplyFn + Send + 'static,
     {
+        let on = self.selected_device.clone();
+        self.spawn_job_on(on.as_ref(), label, job)
+    }
+
+    /// [`Self::spawn_job`] for a job that works on `device`, which may not be
+    /// the selected key (an import's destination): its automatic trace line
+    /// names that key.
+    fn spawn_job_on<F>(
+        &mut self,
+        device: Option<&DeviceId>,
+        label: impl Into<String>,
+        job: F,
+    ) -> bool
+    where
+        F: FnOnce() -> ApplyFn + Send + 'static,
+    {
         // Serialize device access: ignore a new job while one is in flight rather
         // than queueing overlapping card I/O behind a click the user can't see
         // landed. (A single worker thread would serialize anyway, but this also
@@ -5137,10 +5228,32 @@ impl App {
         if self.busy() {
             return false;
         }
+        let label: String = label.into();
+        // While "APDU trace" is on, a job whose result writes no log line (a
+        // read, a refresh) still shows its traffic: one background line named
+        // after the job, under the key it ran on, not whichever key is
+        // selected by the time it finishes.
+        let unclaimed = job_log_text(&label);
+        let ran_on = device
+            .and_then(|id| self.devices.iter().find(|d| &d.id == id))
+            .map(|d| d.title().into_owned());
+        let job = move || -> ApplyFn {
+            let apply = job();
+            Box::new(move |app: &mut App| {
+                apply(app);
+                if app.pending_trace.as_ref().is_some_and(|t| !t.is_empty()) {
+                    let text = match &ran_on {
+                        Some(key) => format!("{key}: {unclaimed}"),
+                        None => unclaimed,
+                    };
+                    app.log_global(Severity::Info, LogKind::Background, text);
+                }
+            })
+        };
         match &self.worker {
             Some(worker) => {
                 self.busy_jobs += 1;
-                self.busy_label = Some(label.into());
+                self.busy_label = Some(label);
                 KEY_WANTS_TOUCH.store(false, std::sync::atomic::Ordering::Relaxed);
                 if worker.job_tx.send(Box::new(job)).is_err() {
                     // Worker died; undo the bookkeeping so the UI doesn't hang.
@@ -5313,6 +5426,57 @@ impl App {
         self.push_log(severity, kind, text.into());
     }
 
+    /// A background line for a failure an automatic read hits (a tab's
+    /// refresh every 30 seconds), skipped when the newest entry already says
+    /// the same, so a failure that persists is logged once rather than
+    /// pushing everything else out of the log.
+    fn log_bg_once(&mut self, severity: Severity, text: impl Into<String>) {
+        let text = match self.selected_device() {
+            Some(d) => format!("{}: {}", d.title(), text.into()),
+            None => text.into(),
+        };
+        let text = without_home(&text);
+        // Against the newest line of the same severity, so the automatic
+        // trace line a traced refresh adds in between doesn't defeat it.
+        let same = std::mem::discriminant(&severity);
+        if self
+            .log
+            .iter()
+            .rev()
+            .find(|l| std::mem::discriminant(&l.severity) == same)
+            .is_some_and(|l| l.text == text && matches!(l.kind, LogKind::Background))
+        {
+            return;
+        }
+        self.push_log(severity, LogKind::Background, text);
+    }
+
+    /// The outcome of a change that finished on `device` after another key
+    /// was selected, so the pane (now showing that other key) didn't get it:
+    /// still one line, under the key it ran on.
+    fn log_moved_on<T, E: std::fmt::Display>(
+        &mut self,
+        device: Option<&DeviceId>,
+        what: &str,
+        result: &Result<T, E>,
+    ) {
+        let key = device
+            .and_then(|id| self.devices.iter().find(|d| &d.id == id))
+            .map_or_else(|| "a key".to_string(), |d| d.title().into_owned());
+        match result {
+            Ok(_) => self.log_global(
+                Severity::Ok,
+                LogKind::User,
+                format!("{key}: {what} finished after another key was selected"),
+            ),
+            Err(e) => self.log_global(
+                Severity::Err,
+                LogKind::User,
+                format!("{key}: {what} failed after another key was selected: {e}"),
+            ),
+        }
+    }
+
     fn push_log(&mut self, severity: Severity, kind: LogKind, text: String) {
         // The trace captured for whichever job's apply closure is running
         // right now (see `Worker::spawn`), if any — attached to the first log
@@ -5322,7 +5486,10 @@ impl App {
         self.log.push(LogLine {
             severity,
             kind,
-            text,
+            // A file path in a message (a backup's, an import's) names the
+            // person's home folder; the log is meant to be pasted into bug
+            // reports, so that part shows as `~`.
+            text: without_home(&text),
             trace,
         });
         // Keep the log bounded; oldest entries are least interesting.
@@ -5800,6 +5967,11 @@ impl App {
                                 app.security_keys.info = Some(info);
                             }
                             Some(Err(e)) => {
+                                // A read: logged once, in the background.
+                                app.log_bg_once(
+                                    Severity::Err,
+                                    format!("FIDO2: GetInfo failed: {e}"),
+                                );
                                 app.security_keys.error = Some(format!("GetInfo failed: {}", e))
                             }
                             None => {
@@ -5812,7 +5984,10 @@ impl App {
                         }
                         app.apply_key_details();
                     }
-                    Err(e) => app.security_keys.error = Some(e),
+                    Err(e) => {
+                        app.log_bg_once(Severity::Err, format!("FIDO2: {e}"));
+                        app.security_keys.error = Some(e);
+                    }
                 }
             })
         });
@@ -5911,6 +6086,7 @@ impl App {
             self.security_keys.error = None;
             return;
         }
+        self.log(Severity::Err, format!("FIDO2: unlock failed: {error}"));
         self.security_keys.error = Some(format!("unlock failed: {}", error));
     }
 
@@ -6257,6 +6433,22 @@ impl App {
         self.clipboard_clear_at = Some((text, now_secs_f64() + 45.0));
     }
 
+    /// A change to the key's large-blob storage that worked: the tab's
+    /// status line, and an activity-log line (counts only, never a note).
+    fn storage_done(&mut self, status: String) {
+        self.log(
+            Severity::Ok,
+            format!("Storage: {}", status.trim_end_matches('.')),
+        );
+        self.security_keys.lb_status = Some(status);
+    }
+
+    /// A change to the key's large-blob storage that failed.
+    fn storage_failed(&mut self, status: String) {
+        self.log(Severity::Err, format!("Storage: {status}"));
+        self.security_keys.lb_status = Some(status);
+    }
+
     /// Resolve a failed unlocked-session operation. When the underlying CTAP
     /// error is a PIN / PIN-auth failure (`0x31` / `0x33` / `0x34`) the key has
     /// invalidated the in-flight session, so we drop it and ask the user to
@@ -6265,6 +6457,7 @@ impl App {
     /// already hold a session — `try_unlock`'s own wrong-PIN handling is left
     /// untouched.
     fn fail_session_op(&mut self, err: &SessionOpError, context: &str) {
+        self.log(Severity::Err, format!("FIDO2: {context}: {err}"));
         if err.relock {
             self.lock_session();
             self.security_keys.error = Some(
@@ -6569,11 +6762,17 @@ impl App {
 
             Box::new(move |app: &mut App| {
                 if !completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
+                    // Selecting another key cancels an enrollment on purpose;
+                    // that isn't a failure worth a line.
+                    if !matches!(&result, Err(e) if e.message == "cancelled") {
+                        app.log_moved_on(for_device.as_ref(), "enrolling a fingerprint", &result);
+                    }
                     return; // selection changed mid-enroll; the progress cell
                             // was already dropped + cancelled on selection change
                 }
                 match result {
                     Ok(list) => {
+                        app.log(Severity::Ok, "Fingerprint enrolled");
                         app.security_keys.fingerprints = Some(list);
                         app.security_keys.fp_new_name.clear();
                         app.security_keys.error = None;
@@ -6614,10 +6813,14 @@ impl App {
             });
             Box::new(move |app: &mut App| {
                 if !completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
+                    app.log_moved_on(for_device.as_ref(), "deleting a fingerprint", &result);
                     return; // selection changed mid-op; discard the stale completion
                 }
                 match result {
-                    Ok(list) => app.security_keys.fingerprints = Some(list),
+                    Ok(list) => {
+                        app.log(Severity::Ok, "Fingerprint deleted");
+                        app.security_keys.fingerprints = Some(list);
+                    }
                     Err(e) => app.fail_session_op(&e, "delete failed"),
                 }
             })
@@ -6645,10 +6848,14 @@ impl App {
             });
             Box::new(move |app: &mut App| {
                 if !completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
+                    app.log_moved_on(for_device.as_ref(), "renaming a fingerprint", &result);
                     return; // selection changed mid-op; discard the stale completion
                 }
                 match result {
-                    Ok(list) => app.security_keys.fingerprints = Some(list),
+                    Ok(list) => {
+                        app.log(Severity::Ok, "Fingerprint renamed");
+                        app.security_keys.fingerprints = Some(list);
+                    }
                     Err(e) => app.fail_session_op(&e, "rename failed"),
                 }
             })
@@ -6740,6 +6947,12 @@ impl App {
             AdvancedAction::EnterpriseAttestation => "Enabling enterprise attestation\u{2026}",
             AdvancedAction::None => return,
         };
+        let done = match action {
+            AdvancedAction::ToggleAlwaysUv => "Always UV changed",
+            AdvancedAction::SetMinPin => "Minimum PIN length set",
+            AdvancedAction::ForcePinChange => "PIN change requested",
+            _ => "Enterprise attestation enabled",
+        };
         let for_device = self.selected_device.clone();
         self.spawn_job(label, move || {
             let result = Self::with_config(&target, &pin, |cfg| match action {
@@ -6759,10 +6972,12 @@ impl App {
             });
             Box::new(move |app: &mut App| {
                 if !completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
+                    app.log_moved_on(for_device.as_ref(), "changing a FIDO2 setting", &result);
                     return; // selection changed mid-flight; discard
                 }
                 match result {
                     Ok(()) => {
+                        app.log(Severity::Ok, done);
                         app.security_keys.advanced = None;
                         app.security_keys.error = None;
                         // Re-read info so alwaysUv / minPinLength reflect the change.
@@ -6794,12 +7009,20 @@ impl App {
         let for_device = self.selected_device.clone();
         self.spawn_job("Deleting credential\u{2026}", move || {
             // Delete, then re-list in the same job so the UI updates atomically.
-            let result = Self::try_delete(&target, token, &cred_id)
+            // `deleted`: the passkey is gone, whatever the re-list says.
+            let deleted = Self::try_delete(&target, token, &cred_id);
+            let wrote = deleted.is_ok();
+            let result = deleted
                 .and_then(|()| Self::refresh_with_token(&target, token_refresh, pin_refresh))
                 .map_err(SessionOpError::from_boxed);
             Box::new(move |app: &mut App| {
                 if !completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
+                    let outcome = if wrote { Ok(()) } else { result.map(|_| ()) };
+                    app.log_moved_on(for_device.as_ref(), "deleting a passkey", &outcome);
                     return; // selection changed mid-delete; drop the refresh
+                }
+                if wrote {
+                    app.log(Severity::Ok, "Passkey deleted");
                 }
                 match result {
                     Ok(fresh) => {
@@ -6807,6 +7030,7 @@ impl App {
                         app.security_keys.session_device = for_device.clone();
                         app.security_keys.error = None;
                     }
+                    Err(e) if wrote => app.fail_session_op(&e, "passkey list not read again"),
                     Err(e) => app.fail_session_op(&e, "delete failed"),
                 }
             })
@@ -6871,7 +7095,13 @@ impl App {
                             Some(&keyroost_ctap::ssh_cert::default_cert_filename(&rp_id)),
                         );
                     }
-                    Err(e) => app.security_keys.ssh_cert_status = Some(e),
+                    Err(e) => {
+                        app.log(
+                            Severity::Err,
+                            format!("FIDO2: SSH certificate not read: {e}"),
+                        );
+                        app.security_keys.ssh_cert_status = Some(e);
+                    }
                 }
             })
         });
@@ -6939,6 +7169,7 @@ impl App {
             let result = Self::try_change_pin(&target, &old, &new).map_err(|e| e.to_string());
             Box::new(move |app: &mut App| match result {
                 Ok(()) => {
+                    app.log(Severity::Ok, "FIDO2 PIN changed");
                     app.security_keys.change_pin.open = false;
                     app.security_keys.error = None;
                     // Force re-unlock with the new PIN, and clear a cached
@@ -6947,7 +7178,10 @@ impl App {
                     app.lock_session();
                     app.fetch_selected_info();
                 }
-                Err(e) => app.security_keys.error = Some(format!("change PIN failed: {}", e)),
+                Err(e) => {
+                    app.log(Severity::Err, format!("FIDO2: change PIN failed: {e}"));
+                    app.security_keys.error = Some(format!("change PIN failed: {}", e));
+                }
             })
         });
     }
@@ -6991,11 +7225,15 @@ impl App {
             })();
             Box::new(move |app: &mut App| match result {
                 Ok(()) => {
+                    app.log(Severity::Ok, "FIDO2 PIN set");
                     app.security_keys.change_pin = ChangePinDialog::default();
                     app.security_keys.error = None;
                     app.fetch_selected_info();
                 }
-                Err(e) => app.security_keys.error = Some(format!("set PIN failed: {e}")),
+                Err(e) => {
+                    app.log(Severity::Err, format!("FIDO2: set PIN failed: {e}"));
+                    app.security_keys.error = Some(format!("set PIN failed: {e}"));
+                }
             })
         });
     }
@@ -7076,7 +7314,8 @@ impl App {
                      \u{2014} its passkeys and PIN are still on it: {e}"
                 ),
             };
-            app.log(Severity::Warn, note);
+            // Global: `log` would put the newly selected key's name on it.
+            app.log_global(Severity::Warn, LogKind::User, note);
             return;
         }
         match result {
@@ -7091,6 +7330,8 @@ impl App {
                 if resolve_fido_reset_row(&mut app.factory_reset_report, outcome.clone()) {
                     let (severity, line) = factory_reset_fido_finale_log_line(&outcome);
                     app.log(severity, line);
+                } else {
+                    app.log(Severity::Ok, "FIDO2 reset: passkeys and PIN wiped");
                 }
                 // Re-read info so the PIN status reflects the wipe.
                 app.fetch_selected_info();
@@ -7115,6 +7356,8 @@ impl App {
                 if resolve_fido_reset_row(&mut app.factory_reset_report, outcome.clone()) {
                     let (severity, line) = factory_reset_fido_finale_log_line(&outcome);
                     app.log(severity, line);
+                } else {
+                    app.log(Severity::Err, format!("FIDO2: {msg}"));
                 }
                 app.security_keys.error = Some(msg);
             }
@@ -7368,12 +7611,18 @@ impl App {
                             row.valid_until = valid_until;
                         }
                     }
-                    Err(TransportError::OathPasswordRejected) => {
-                        app.oath.unlocked_password = None;
-                        app.oath.locked = true;
-                        app.oath.error = Some("wrong OATH password".into());
+                    Err(e) => {
+                        if let Some(line) = oath_failure_line(&e, !password.is_empty()) {
+                            app.log(Severity::Err, line);
+                        }
+                        if matches!(e, TransportError::OathPasswordRejected) {
+                            app.oath.unlocked_password = None;
+                            app.oath.locked = true;
+                            app.oath.error = Some("wrong OATH password".into());
+                        } else {
+                            app.oath.error = Some(e.to_string());
+                        }
                     }
-                    Err(e) => app.oath.error = Some(e.to_string()),
                 }
             })
         });
@@ -7480,6 +7729,9 @@ impl App {
             return;
         };
         let password = oath_effective_password(&self.oath);
+        // A password typed into the unlock box: a failure is the user's
+        // attempt (a full line), not an automatic refresh's.
+        let typed = !self.oath.password_input.is_empty();
         let for_device = self.selected_device.clone();
         let touch = self.oath_touch_names();
         self.spawn_job("Reading OATH codes\u{2026}", move || {
@@ -7492,8 +7744,18 @@ impl App {
                 // can block on a touch) was in flight — device B's pane must
                 // not show device A's codes.
                 if completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
-                    if let Ok((_, asks)) = &result {
-                        app.oath.delete_asks_touch = *asks;
+                    match &result {
+                        Ok((_, asks)) => app.oath.delete_asks_touch = *asks,
+                        // An automatic read: logged once, in the background.
+                        Err(e) => {
+                            if let Some(line) = oath_failure_line(e, !password.is_empty()) {
+                                if typed {
+                                    app.log(Severity::Err, line);
+                                } else {
+                                    app.log_bg_once(Severity::Err, line);
+                                }
+                            }
+                        }
                     }
                     Self::apply_oath_rows(app, result.map(|(rows, _)| rows), password);
                 }
@@ -7552,6 +7814,8 @@ impl App {
             // (the same check as `oath add` and the import plan).
             let mut refused: Option<String> = None;
             let mut asks = false;
+            // The account was written, whatever the re-list after it says.
+            let mut wrote = false;
             let result = (|| -> Result<(Vec<OathRow>, usize), TransportError> {
                 let mut session = Self::oath_open_unlock(&name, &password)?;
                 asks = session.asks_touch_to_delete();
@@ -7577,17 +7841,40 @@ impl App {
                     require_touch,
                     imf: 0,
                 })?;
+                wrote = true;
                 Self::oath_list_rows(&mut session, &touch)
             })();
             Box::new(move |app: &mut App| {
-                if completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
-                    if result.is_ok() {
-                        app.oath.delete_asks_touch = asks;
+                let what = "adding an Authenticator account";
+                if !completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
+                    let outcome = match (&refused, wrote) {
+                        (_, true) => Ok(()),
+                        (Some(why), false) => Err(why.clone()),
+                        (None, false) => result.map(|_| ()).map_err(|e| e.to_string()),
+                    };
+                    app.log_moved_on(for_device.as_ref(), what, &outcome);
+                    return;
+                }
+                if wrote {
+                    app.log(Severity::Ok, "Authenticator account added");
+                }
+                if let Some(why) = &refused {
+                    app.log(
+                        Severity::Warn,
+                        format!("Authenticator account not added: {why}"),
+                    );
+                }
+                match &result {
+                    Ok(_) => app.oath.delete_asks_touch = asks,
+                    Err(e) => {
+                        if let Some(line) = oath_failure_line(e, !password.is_empty()) {
+                            app.log(Severity::Err, line);
+                        }
                     }
-                    Self::apply_oath_rows(app, result, password);
-                    if let Some(why) = refused.filter(|_| app.oath.add.open) {
-                        app.oath.add.result = Some(Err(why));
-                    }
+                }
+                Self::apply_oath_rows(app, result, password);
+                if let Some(why) = refused.filter(|_| app.oath.add.open) {
+                    app.oath.add.result = Some(Err(why));
                 }
             })
         });
@@ -7609,19 +7896,34 @@ impl App {
         let label = oath_delete_label(self.oath.delete_asks_touch, touch.contains(&cred_name));
         self.spawn_job(label, move || {
             let mut asks = false;
+            // The account was deleted, whatever the re-list after it says.
+            let mut wrote = false;
             let result = (|| -> Result<(Vec<OathRow>, usize), TransportError> {
                 let mut session = Self::oath_open_unlock(&reader, &password)?;
                 asks = session.asks_touch_to_delete();
                 session.delete(&cred_name)?;
+                wrote = true;
                 Self::oath_list_rows(&mut session, &touch)
             })();
             Box::new(move |app: &mut App| {
-                if completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
-                    if result.is_ok() {
-                        app.oath.delete_asks_touch = asks;
-                    }
-                    Self::apply_oath_rows(app, result, password);
+                let what = "deleting an Authenticator account";
+                if !completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
+                    let outcome = if wrote { Ok(()) } else { result.map(|_| ()) };
+                    app.log_moved_on(for_device.as_ref(), what, &outcome);
+                    return;
                 }
+                if wrote {
+                    app.log(Severity::Ok, "Authenticator account deleted");
+                }
+                match &result {
+                    Ok(_) => app.oath.delete_asks_touch = asks,
+                    Err(e) => {
+                        if let Some(line) = oath_failure_line(e, !password.is_empty()) {
+                            app.log(Severity::Err, line);
+                        }
+                    }
+                }
+                Self::apply_oath_rows(app, result, password);
             })
         });
     }
@@ -7881,16 +8183,21 @@ impl App {
             })();
             Box::new(move |app: &mut App| {
                 if !completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
+                    app.log_moved_on(for_device.as_ref(), "resetting the Authenticator", &result);
                     return;
                 }
                 match result {
                     Ok(()) => {
+                        app.log(Severity::Ok, "Authenticator reset");
                         // Fresh state: the applet is now empty and unprotected;
                         // clearing oath_tried lets the pane re-list on its own.
                         app.oath = OathState::default();
                         app.oath_tried = false;
                     }
-                    Err(e) => app.oath.error = Some(format!("reset failed: {e}")),
+                    Err(e) => {
+                        app.log(Severity::Err, format!("Authenticator reset failed: {e}"));
+                        app.oath.error = Some(format!("reset failed: {e}"));
+                    }
                 }
             })
         });
@@ -7950,6 +8257,9 @@ impl App {
         };
         let for_device = dev.id;
         self.spawn_job("Checking PIV reset support\u{2026}", move || {
+            // Why the check failed, for the log (the dialog then says it
+            // couldn't tell).
+            let mut check_failed: Option<String> = None;
             let (preview, needs_reset_mgmt_auth, default_mgmt_key, reset_long_running) =
                 keyroost_transport::PivSession::with_transaction(&reader, |s| {
                     // One fingerprint serves all four checks — see
@@ -7965,15 +8275,19 @@ impl App {
                             .contains(&keyroost_piv::compat::PivQuirk::ResetLongRunning),
                     ))
                 })
-                .unwrap_or((
-                    FactoryResetPivPreview::CheckFailed,
-                    false,
-                    None,
-                    false,
-                ));
+                .unwrap_or_else(|e| {
+                    check_failed = Some(e.to_string());
+                    (FactoryResetPivPreview::CheckFailed, false, None, false)
+                });
             Box::new(move |app: &mut App| {
                 if !completion_still_valid(Some(&for_device), app.selected_device.as_ref()) {
                     return;
+                }
+                if let Some(e) = check_failed {
+                    app.log(
+                        Severity::Warn,
+                        format!("PIV: couldn't check reset support: {e}"),
+                    );
                 }
                 app.factory_reset_confirm = Some(FactoryResetConfirmState {
                     for_device,
@@ -9027,7 +9341,11 @@ impl App {
                         app.openpgp.supported = supported;
                         app.openpgp.loaded = true;
                     }
-                    Err(e) => app.openpgp.error = Some(e.to_string()),
+                    // An automatic read: logged once, in the background.
+                    Err(e) => {
+                        app.log_bg_once(Severity::Err, format!("OpenPGP: {e}"));
+                        app.openpgp.error = Some(e.to_string());
+                    }
                 }
             })
         });
@@ -9047,11 +9365,14 @@ impl App {
     /// Re-read status after a write and store it, surfacing `notice` on success.
     /// `keys_changed`: the write replaced or wiped keys, so what was read about
     /// key presence no longer holds; other writes (name, URL, PINs) keep it.
+    /// `wrote`: the change itself went through, so a failure can only be
+    /// the status re-read after it; the change is still logged as done.
     fn apply_openpgp_write(
         app: &mut App,
         result: Result<keyroost_transport::OpenPgpStatus, TransportError>,
         notice: String,
         keys_changed: bool,
+        wrote: bool,
     ) {
         match result {
             Ok(status) => {
@@ -9061,11 +9382,22 @@ impl App {
                 }
                 app.openpgp.loaded = true;
                 app.openpgp.error = None;
-                app.openpgp.notice = Some(notice);
+                app.openpgp_done(notice);
+                wipe(&mut app.openpgp.admin_pin);
+            }
+            Err(e) if wrote => {
+                let done = notice.trim_end_matches('.');
+                app.log(Severity::Ok, done.to_string());
+                app.log(
+                    Severity::Err,
+                    format!("OpenPGP: the card couldn't be read again: {e}"),
+                );
+                app.openpgp.error =
+                    Some(format!("{done}, but the card couldn't be read again: {e}"));
                 wipe(&mut app.openpgp.admin_pin);
             }
             Err(e) => {
-                app.openpgp.error = Some(e.to_string());
+                app.openpgp_failed(e.to_string());
                 wipe(&mut app.openpgp.admin_pin);
             }
         }
@@ -9085,6 +9417,20 @@ impl App {
                 None => Some(Ok(())),
             };
         }
+    }
+
+    /// An OpenPGP change that worked: the pane's notice, and an activity-log
+    /// line.
+    fn openpgp_done(&mut self, notice: String) {
+        self.log(Severity::Ok, notice.trim_end_matches('.').to_string());
+        self.openpgp.notice = Some(notice);
+    }
+
+    /// An OpenPGP operation that failed: the pane's error, and an
+    /// activity-log line.
+    fn openpgp_failed(&mut self, err: String) {
+        self.log(Severity::Err, format!("OpenPGP: {err}"));
+        self.openpgp.error = Some(err);
     }
 
     /// The admin PIN (PW3) the modal's flows send: the typed `admin_pin`, or the
@@ -9108,13 +9454,16 @@ impl App {
         let value = self.openpgp.name_input.clone();
         self.openpgp.notice = None;
         self.spawn_job("Setting cardholder name…", move || {
+            // The change was made, whatever the status re-read after it says.
+            let mut wrote = false;
             let result = (|| -> Result<keyroost_transport::OpenPgpStatus, TransportError> {
                 let mut s = Self::openpgp_open_admin(&name, &pin)?;
                 s.set_cardholder_name(value.as_bytes())?;
+                wrote = true;
                 s.status()
             })();
             Box::new(move |app: &mut App| {
-                Self::apply_openpgp_write(app, result, "Cardholder name set.".into(), false)
+                Self::apply_openpgp_write(app, result, "Cardholder name set.".into(), false, wrote)
             })
         });
     }
@@ -9128,13 +9477,16 @@ impl App {
         let value = self.openpgp.url_input.clone();
         self.openpgp.notice = None;
         self.spawn_job("Setting public-key URL…", move || {
+            // The change was made, whatever the status re-read after it says.
+            let mut wrote = false;
             let result = (|| -> Result<keyroost_transport::OpenPgpStatus, TransportError> {
                 let mut s = Self::openpgp_open_admin(&name, &pin)?;
                 s.set_url(value.as_bytes())?;
+                wrote = true;
                 s.status()
             })();
             Box::new(move |app: &mut App| {
-                Self::apply_openpgp_write(app, result, "Public-key URL set.".into(), false)
+                Self::apply_openpgp_write(app, result, "Public-key URL set.".into(), false, wrote)
             })
         });
     }
@@ -9166,12 +9518,15 @@ impl App {
                         app.openpgp.key_present = [None; 3];
                         app.openpgp.loaded = true;
                         app.openpgp.error = None;
-                        app.openpgp.notice =
-                            Some(format!("Generated {} key: {}", slot.label(), hex_lower(&fpr)));
+                        app.openpgp_done(format!(
+                            "Generated {} key: {}",
+                            slot.label(),
+                            hex_lower(&fpr)
+                        ));
                         wipe(&mut app.openpgp.admin_pin);
                     }
                     Err(e) => {
-                        app.openpgp.error = Some(e.to_string());
+                        app.openpgp_failed(e.to_string());
                         wipe(&mut app.openpgp.admin_pin);
                     }
                 }
@@ -9268,6 +9623,7 @@ impl App {
             })();
             Box::new(move |app: &mut App| {
                 if !completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
+                    app.log_moved_on(for_device.as_ref(), "importing a key from a file", &result);
                     return;
                 }
                 match result {
@@ -9276,14 +9632,14 @@ impl App {
                         app.openpgp.key_present = [None; 3];
                         app.openpgp.loaded = true;
                         app.openpgp.error = None;
-                        app.openpgp.notice = Some(format!(
+                        app.openpgp_done(format!(
                             "Imported {} key ({kind}): {}",
                             slot.label(),
                             hex_lower(&fpr)
                         ));
                         app.openpgp.import_path.clear();
                     }
-                    Err(e) => app.openpgp.error = Some(e),
+                    Err(e) => app.openpgp_failed(e),
                 }
                 if file_is_openpgp {
                     app.openpgp.import_is_openpgp = true;
@@ -9298,6 +9654,14 @@ impl App {
     /// Settle one step of a multi-step OpenPGP dialog (create, restore) that
     /// moves to its next stage rather than finishing: `busy` clears, and an
     /// error stays in the dialog for a retry.
+    /// A dialog step's job that failed: shown in the dialog, and logged.
+    /// (A form hint before anything runs goes to [`Self::openpgp_modal_step`]
+    /// alone.)
+    fn openpgp_step_failed(app: &mut App, err: String) {
+        app.log(Severity::Err, format!("OpenPGP: {err}"));
+        Self::openpgp_modal_step(app, Some(err));
+    }
+
     fn openpgp_modal_step(app: &mut App, err: Option<String>) {
         if let Some(m) = app.openpgp.cred_modal.as_mut() {
             m.busy = false;
@@ -9378,7 +9742,7 @@ impl App {
                         app.openpgp.created = Some(std::sync::Arc::new(created));
                         Self::openpgp_modal_step(app, None);
                     }
-                    Err(e) => Self::openpgp_modal_step(app, Some(e)),
+                    Err(e) => Self::openpgp_step_failed(app, e),
                 }
             })
         })
@@ -9418,6 +9782,11 @@ impl App {
                 drop(created);
                 Box::new(move |app: &mut App| {
                     if !completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
+                        app.log_moved_on(
+                            for_device.as_ref(),
+                            "putting new keys on the card",
+                            &result.as_ref().map(|_| ()).map_err(|f| f.message.clone()),
+                        );
                         return;
                     }
                     wipe(&mut app.openpgp.admin_pin);
@@ -9428,7 +9797,7 @@ impl App {
                             app.openpgp.key_present = [None; 3];
                             app.openpgp.loaded = true;
                             app.openpgp.error = None;
-                            app.openpgp.notice = Some(format!(
+                            app.openpgp_done(format!(
                                 "Keys loaded. Backup saved to {}; keep it and the revocation \
                              certificate offline.",
                                 backup.display()
@@ -9448,7 +9817,7 @@ impl App {
                                 .is_some_and(|prev| prev.card_touched);
                             let msg = f.message.clone();
                             app.openpgp.created_failure = Some(f);
-                            Self::openpgp_modal_step(app, Some(msg));
+                            Self::openpgp_step_failed(app, msg);
                         }
                     }
                 })
@@ -9511,7 +9880,7 @@ impl App {
                         app.openpgp.restore_loaded = Some(std::sync::Arc::new(loaded));
                         Self::openpgp_modal_step(app, None);
                     }
-                    Err(e) => Self::openpgp_modal_step(app, Some(e)),
+                    Err(e) => Self::openpgp_step_failed(app, e),
                 }
             })
         })
@@ -9553,6 +9922,7 @@ impl App {
                 let what = pgp_slots_text(&slots);
                 Box::new(move |app: &mut App| {
                     if !completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
+                        app.log_moved_on(for_device.as_ref(), "restoring a backup", &result);
                         return;
                     }
                     wipe(&mut app.openpgp.admin_pin);
@@ -9563,13 +9933,13 @@ impl App {
                             app.openpgp.key_present = [None; 3];
                             app.openpgp.loaded = true;
                             app.openpgp.error = None;
-                            app.openpgp.notice = Some(format!("Loaded {what} from {path}."));
+                            app.openpgp_done(format!("Loaded {what} from {path}."));
                             if let Some(m) = app.openpgp.cred_modal.as_mut() {
                                 m.busy = false;
                                 m.result = Some(Ok(()));
                             }
                         }
-                        Err(e) => Self::openpgp_modal_step(app, Some(sentence(e))),
+                        Err(e) => Self::openpgp_step_failed(app, sentence(e)),
                     }
                 })
             },
@@ -9609,7 +9979,7 @@ impl App {
                         f.cert = Some(cert);
                         Self::openpgp_modal_step(app, None);
                     }
-                    Err(e) => Self::openpgp_modal_step(app, Some(e)),
+                    Err(e) => Self::openpgp_step_failed(app, e),
                 }
             })
         })
@@ -9733,6 +10103,7 @@ impl App {
             drop(secret);
             Box::new(move |app: &mut App| {
                 if !completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
+                    app.log_moved_on(for_device.as_ref(), "changing the expiry", &result);
                     return;
                 }
                 wipe(&mut app.openpgp.passphrase);
@@ -9740,13 +10111,13 @@ impl App {
                 match result {
                     Ok(()) => {
                         app.openpgp.error = None;
-                        app.openpgp.notice = Some(expiry_saved_notice(&public));
+                        app.openpgp_done(expiry_saved_notice(&public));
                         if let Some(m) = app.openpgp.cred_modal.as_mut() {
                             m.busy = false;
                             m.result = Some(Ok(()));
                         }
                     }
-                    Err(e) => Self::openpgp_modal_step(app, Some(e)),
+                    Err(e) => Self::openpgp_step_failed(app, e),
                 }
             })
         })
@@ -9762,13 +10133,17 @@ impl App {
         self.openpgp.notice = None;
         let for_device = self.selected_device.clone();
         self.spawn_job("Resetting OpenPGP applet…", move || {
+            // The change was made, whatever the status re-read after it says.
+            let mut wrote = false;
             let result = (|| -> Result<keyroost_transport::OpenPgpStatus, TransportError> {
                 let mut s = keyroost_transport::OpenPgpSession::open(&name)?;
                 s.factory_reset()?;
+                wrote = true;
                 s.status()
             })();
             Box::new(move |app: &mut App| {
                 if !completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
+                    app.log_moved_on(for_device.as_ref(), "resetting OpenPGP", &result);
                     return; // selection changed mid-reset; don't paint A's outcome under B
                 }
                 Self::apply_openpgp_write(
@@ -9776,6 +10151,7 @@ impl App {
                     result,
                     "OpenPGP applet reset; keys wiped, PINs back to defaults.".into(),
                     true,
+                    wrote,
                 )
             })
         })
@@ -9791,15 +10167,24 @@ impl App {
         let new = zeroize::Zeroizing::new(self.openpgp.user_pin_new.clone());
         self.openpgp.notice = None;
         self.spawn_job("Changing user PIN\u{2026}", move || {
+            // The change was made, whatever the status re-read after it says.
+            let mut wrote = false;
             let result = (|| -> Result<keyroost_transport::OpenPgpStatus, TransportError> {
                 let mut s = keyroost_transport::OpenPgpSession::open(&name)?;
                 s.change_user_pin(old.as_bytes(), new.as_bytes())?;
+                wrote = true;
                 s.status()
             })();
             Box::new(move |app: &mut App| {
                 wipe(&mut app.openpgp.user_pin_old);
                 wipe(&mut app.openpgp.user_pin_new);
-                Self::apply_openpgp_write(app, result, "User PIN (PW1) changed.".into(), false);
+                Self::apply_openpgp_write(
+                    app,
+                    result,
+                    "User PIN (PW1) changed.".into(),
+                    false,
+                    wrote,
+                );
             })
         });
     }
@@ -9813,15 +10198,24 @@ impl App {
         let new = zeroize::Zeroizing::new(self.openpgp.admin_pin_new.clone());
         self.openpgp.notice = None;
         self.spawn_job("Changing admin PIN\u{2026}", move || {
+            // The change was made, whatever the status re-read after it says.
+            let mut wrote = false;
             let result = (|| -> Result<keyroost_transport::OpenPgpStatus, TransportError> {
                 let mut s = keyroost_transport::OpenPgpSession::open(&name)?;
                 s.change_admin_pin(old.as_bytes(), new.as_bytes())?;
+                wrote = true;
                 s.status()
             })();
             Box::new(move |app: &mut App| {
                 wipe(&mut app.openpgp.admin_pin_old);
                 wipe(&mut app.openpgp.admin_pin_new);
-                Self::apply_openpgp_write(app, result, "Admin PIN (PW3) changed.".into(), false);
+                Self::apply_openpgp_write(
+                    app,
+                    result,
+                    "Admin PIN (PW3) changed.".into(),
+                    false,
+                    wrote,
+                );
             })
         });
     }
@@ -9836,14 +10230,23 @@ impl App {
         let new = zeroize::Zeroizing::new(self.openpgp.unblock_new.clone());
         self.openpgp.notice = None;
         self.spawn_job("Unblocking user PIN\u{2026}", move || {
+            // The change was made, whatever the status re-read after it says.
+            let mut wrote = false;
             let result = (|| -> Result<keyroost_transport::OpenPgpStatus, TransportError> {
                 let mut s = keyroost_transport::OpenPgpSession::open(&name)?;
                 s.reset_retry_counter(admin.as_bytes(), new.as_bytes())?;
+                wrote = true;
                 s.status()
             })();
             Box::new(move |app: &mut App| {
                 wipe(&mut app.openpgp.unblock_new);
-                Self::apply_openpgp_write(app, result, "User PIN (PW1) unblocked.".into(), false);
+                Self::apply_openpgp_write(
+                    app,
+                    result,
+                    "User PIN (PW1) unblocked.".into(),
+                    false,
+                    wrote,
+                );
             })
         });
     }
@@ -17084,7 +17487,14 @@ impl App {
                 // flip it, and the very next device operation's trace
                 // shows up under its log entry.
                 let mut trace_on = app.apdu_trace.load(std::sync::atomic::Ordering::Relaxed);
-                if ui.checkbox(&mut trace_on, "APDU trace").changed() {
+                if ui
+                    .checkbox(&mut trace_on, "APDU trace")
+                    .on_hover_text(
+                        "Record the exact traffic with the key under each entry. \
+                         While it's on, every read and refresh gets an entry too.",
+                    )
+                    .changed()
+                {
                     app.apdu_trace
                         .store(trace_on, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -19265,6 +19675,7 @@ impl App {
 
             Box::new(move |app: &mut App| {
                 if !completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
+                    app.log_moved_on(for_device.as_ref(), "saving to the key's storage", &result);
                     return; // selection changed mid-op; discard the stale completion
                 }
                 match result {
@@ -19274,14 +19685,14 @@ impl App {
                         app.security_keys.lb_capacity = Some(cap);
                         app.security_keys.lb_new_text.clear();
                         app.security_keys.lb_show_add = false;
-                        app.security_keys.lb_status = Some(format!(
+                        app.storage_done(format!(
                             "Saved. {n} entr{} total.",
                             if n == 1 { "y" } else { "ies" }
                         ));
                         app.security_keys.error = None;
                     }
                     Err(e) => {
-                        app.security_keys.lb_status = Some(format!("Save failed: {e}"));
+                        app.storage_failed(format!("Save failed: {e}"));
                     }
                 }
             })
@@ -19344,6 +19755,7 @@ impl App {
 
             Box::new(move |app: &mut App| {
                 if !completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
+                    app.log_moved_on(for_device.as_ref(), "editing a stored note", &result);
                     return; // selection changed mid-op; discard the stale completion
                 }
                 match result {
@@ -19352,11 +19764,11 @@ impl App {
                         app.security_keys.lb_capacity = Some(cap);
                         app.security_keys.lb_editing = None;
                         app.security_keys.lb_edit_text.clear();
-                        app.security_keys.lb_status = Some("Note updated.".into());
+                        app.storage_done("Note updated.".into());
                         app.security_keys.error = None;
                     }
                     Err(e) => {
-                        app.security_keys.lb_status = Some(format!("Edit failed: {e}"));
+                        app.storage_failed(format!("Edit failed: {e}"));
                     }
                 }
             })
@@ -19399,6 +19811,7 @@ impl App {
                 ));
             }
             Err(e) => {
+                self.log_bg_once(Severity::Err, format!("Storage: load failed: {e}"));
                 self.security_keys.lb_status = Some(format!("Load failed: {e}"));
             }
         }
@@ -19484,6 +19897,7 @@ impl App {
 
             Box::new(move |app: &mut App| {
                 if !completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
+                    app.log_moved_on(for_device.as_ref(), "deleting a stored entry", &result);
                     return; // selection changed mid-op; discard the stale completion
                 }
                 match result {
@@ -19492,15 +19906,14 @@ impl App {
                         app.security_keys.large_blobs = Some(array);
                         app.security_keys.lb_capacity = Some(cap);
                         app.security_keys.lb_selected = None;
-                        app.security_keys.lb_status =
-                            Some(format!("Entry deleted. {n} remaining."));
+                        app.storage_done(format!("Entry deleted. {n} remaining."));
                         app.security_keys.error = None;
                         if removes_name {
                             app.refresh_devices();
                         }
                     }
                     Err(e) => {
-                        app.security_keys.lb_status = Some(format!("Update failed: {e}"));
+                        app.storage_failed(format!("Update failed: {e}"));
                     }
                 }
             })
@@ -19583,6 +19996,7 @@ impl App {
 
             Box::new(move |app: &mut App| {
                 if !completion_still_valid(for_device.as_ref(), app.selected_device.as_ref()) {
+                    app.log_moved_on(for_device.as_ref(), "clearing the key's storage", &result);
                     return; // selection changed mid-op; discard the stale completion
                 }
                 match result {
@@ -19591,7 +20005,7 @@ impl App {
                         app.security_keys.large_blobs = Some(array);
                         app.security_keys.lb_capacity = Some(cap);
                         app.security_keys.lb_selected = None;
-                        app.security_keys.lb_status = Some(format!(
+                        app.storage_done(format!(
                             "Storage cleared. {n} entr{} remaining.",
                             if n == 1 { "y" } else { "ies" }
                         ));
@@ -19601,7 +20015,7 @@ impl App {
                         }
                     }
                     Err(e) => {
-                        app.security_keys.lb_status = Some(format!("Clear failed: {e}"));
+                        app.storage_failed(format!("Clear failed: {e}"));
                     }
                 }
             })
@@ -29470,6 +29884,116 @@ mod tests {
         );
     }
 
+    /// With "APDU trace" on, a job whose result writes no log line still gets
+    /// one, named after the job and carrying its trace; a job that logs claims
+    /// its own trace; with nothing captured there's no extra line.
+    #[test]
+    fn a_traced_job_that_logs_nothing_gets_a_line_of_its_own() {
+        // No worker: jobs run inline.
+        let mut app = App {
+            pending_trace: Some(vec!["> 00a4".into()]),
+            ..Default::default()
+        };
+        app.spawn_job("Reading OATH codes\u{2026}", || Box::new(|_: &mut App| {}));
+        let last = app.log.last().expect("a line for the trace");
+        assert_eq!(last.text, "Reading OATH codes");
+        assert!(matches!(last.kind, LogKind::Background));
+        assert_eq!(last.trace.as_deref(), Some(&["> 00a4".to_string()][..]));
+        assert!(app.pending_trace.is_none());
+
+        let n = app.log.len();
+        app.pending_trace = Some(vec!["> 00a4".into()]);
+        app.spawn_job("Deleting OTP entry\u{2026}", || {
+            Box::new(|app: &mut App| app.log(Severity::Ok, "OTP entry deleted"))
+        });
+        assert_eq!(app.log.len(), n + 1);
+        assert_eq!(app.log[n].text, "OTP entry deleted");
+        assert!(app.log[n].trace.is_some());
+
+        app.spawn_job("Scanning for devices\u{2026}", || {
+            Box::new(|_: &mut App| {})
+        });
+        assert_eq!(app.log.len(), n + 1);
+    }
+
+    /// The automatic line drops the busy label's ellipsis and touch hint.
+    #[test]
+    fn job_log_text_drops_the_ellipsis_and_touch_hints() {
+        assert_eq!(
+            job_log_text("Reading OATH codes\u{2026}"),
+            "Reading OATH codes"
+        );
+        assert_eq!(
+            job_log_text("Deleting credential \u{2014} touch the key if it blinks\u{2026}"),
+            "Deleting credential"
+        );
+        assert_eq!(
+            job_log_text("Generating key\u{2026} (touch the key if it blinks)"),
+            "Generating key"
+        );
+        assert_eq!(
+            job_log_text("Writing profile #3\u{2026}"),
+            "Writing profile #3"
+        );
+        assert_eq!(
+            job_log_text("Resetting key\u{2026} (touch now)"),
+            "Resetting key"
+        );
+        // A label that's an instruction logs as what the job did.
+        assert_eq!(
+            job_log_text("Touch your key to read the code\u{2026}"),
+            "Reading code"
+        );
+        assert_eq!(
+            job_log_text("Touch the fingerprint sensor\u{2026}"),
+            "Unlocking with a fingerprint"
+        );
+    }
+
+    /// The home folder in a log line shows as `~`, only where it is a whole
+    /// path part: a home of `/home/al` leaves `/home/alice` alone.
+    #[test]
+    fn log_lines_show_the_home_folder_as_a_tilde() {
+        assert_eq!(
+            with_home_as_tilde("saved /home/al/keys/backup.asc", "/home/al"),
+            "saved ~/keys/backup.asc"
+        );
+        assert_eq!(
+            with_home_as_tilde("saved /home/alice/x.asc", "/home/al"),
+            "saved /home/alice/x.asc"
+        );
+        assert_eq!(with_home_as_tilde("at /home/al", "/home/al/"), "at ~");
+        assert_eq!(
+            with_home_as_tilde(r"C:\Users\al\x.asc", r"C:\Users\al"),
+            r"~\x.asc"
+        );
+        assert_eq!(with_home_as_tilde("/etc/x", "/"), "/etc/x");
+        assert_eq!(with_home_as_tilde("/srv/root/x", "/root"), "/srv/root/x");
+        // Fails closed: anything before the home that doesn't continue a
+        // path name starts one, so these are all shortened.
+        for (text, want) in [
+            ("`/home/al/x`", "`~/x`"),
+            ("[/home/al/x]", "[~/x]"),
+            ("<{/home/al/x}>", "<{~/x}>"),
+            ("a\t/home/al/x", "a\t~/x"),
+            ("k:/home/al/x", "k:~/x"),
+            ("file:///home/al/x", "file://~/x"),
+        ] {
+            assert_eq!(with_home_as_tilde(text, "/home/al"), want, "{text}");
+        }
+        assert_eq!(
+            with_home_as_tilde(r"\\?\C:\Users\al\x.asc", r"C:\Users\al"),
+            r"\\?\~\x.asc"
+        );
+        // A home that is the tail of a longer name stays.
+        assert_eq!(with_home_as_tilde("x/home/al/y", "/home/al"), "x/home/al/y");
+        assert_eq!(with_home_as_tilde("my_/home/al", "/home/al"), "my_/home/al");
+        assert_eq!(
+            with_home_as_tilde("from \"/root/a\" and (/root/b)", "/root"),
+            "from \"~/a\" and (~/b)"
+        );
+    }
+
     /// With no worker (the default), a job runs inline so headless tests and any
     /// non-GUI use still apply results.
     #[test]
@@ -30703,6 +31227,141 @@ mod tests {
         // Shown only while its window lasts.
         assert_eq!(touched().code_at(start + 59), Some("123456"));
         assert_eq!(touched().code_at(start + 60), None);
+    }
+
+    /// A rejected password is an error only when one was sent: opening the
+    /// tab on a protected key with nothing typed just shows the lock. Any
+    /// other failure is always a line.
+    #[test]
+    fn authenticator_failures_log_except_an_untyped_password() {
+        assert_eq!(
+            oath_failure_line(&TransportError::OathPasswordRejected, false),
+            None
+        );
+        assert_eq!(
+            oath_failure_line(&TransportError::OathPasswordRejected, true).as_deref(),
+            Some("Authenticator: wrong password")
+        );
+        assert!(
+            oath_failure_line(&TransportError::OathCredentialTooLong, false)
+                .is_some_and(|l| l.starts_with("Authenticator: OATH credential name"))
+        );
+    }
+
+    /// A failure an automatic refresh keeps hitting is logged once; a
+    /// different one is logged again.
+    #[test]
+    fn a_repeating_background_failure_is_logged_once() {
+        let mut app = App::default();
+        app.log_bg_once(Severity::Err, "Authenticator: reader gone");
+        app.log_bg_once(Severity::Err, "Authenticator: reader gone");
+        app.log_bg_once(Severity::Err, "Authenticator: card reset");
+        app.log_bg_once(Severity::Err, "Authenticator: reader gone");
+        let lines: Vec<&str> = app.log.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(
+            lines,
+            vec![
+                "Authenticator: reader gone",
+                "Authenticator: card reset",
+                "Authenticator: reader gone"
+            ]
+        );
+    }
+
+    /// A FIDO2 reset run on its own (not a factory reset's last step) writes
+    /// a line, success or failure.
+    #[test]
+    fn a_standalone_fido2_reset_is_logged() {
+        let a: DeviceId = "serial:AAA".into();
+        let mut app = App {
+            selected_device: Some(a.clone()),
+            ..Default::default()
+        };
+        App::apply_reset_path_outcome(&mut app, Some(&a), Ok(()));
+        App::apply_reset_path_outcome(&mut app, Some(&a), Err("no touch".into()));
+        let lines: Vec<(&str, bool)> = app
+            .log
+            .iter()
+            .map(|l| (l.text.as_str(), matches!(l.severity, Severity::Err)))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                ("FIDO2 reset: passkeys and PIN wiped", false),
+                ("FIDO2: reset failed: no touch", true)
+            ]
+        );
+    }
+
+    /// An OpenPGP change that went through but whose status re-read failed
+    /// is logged as made, plus the failed re-read; one that failed is just
+    /// a failure.
+    #[test]
+    fn an_openpgp_change_logs_as_made_when_only_the_reread_failed() {
+        let mut app = App::default();
+        App::apply_openpgp_write(
+            &mut app,
+            Err(TransportError::OathCredentialTooLong),
+            "User PIN (PW1) changed.".into(),
+            false,
+            true,
+        );
+        assert_eq!(app.log[0].text, "User PIN (PW1) changed");
+        assert!(matches!(app.log[0].severity, Severity::Ok));
+        assert!(app.log[1]
+            .text
+            .starts_with("OpenPGP: the card couldn't be read again"));
+        assert!(app
+            .openpgp
+            .error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("User PIN (PW1) changed, but")));
+
+        let mut app = App::default();
+        App::apply_openpgp_write(
+            &mut app,
+            Err(TransportError::OathCredentialTooLong),
+            "User PIN (PW1) changed.".into(),
+            false,
+            false,
+        );
+        assert_eq!(app.log.len(), 1);
+        assert!(matches!(app.log[0].severity, Severity::Err));
+    }
+
+    /// A change that finishes after another key was selected still gets a
+    /// line, under the key it ran on.
+    #[test]
+    fn a_change_that_finishes_after_switching_keys_is_logged() {
+        let mut app = App::default();
+        app.log_moved_on(
+            None,
+            "deleting an Authenticator account",
+            &Ok::<(), String>(()),
+        );
+        app.log_moved_on(
+            None,
+            "resetting the Authenticator",
+            &Err::<(), String>("card removed".into()),
+        );
+        let lines: Vec<(&str, bool)> = app
+            .log
+            .iter()
+            .map(|l| (l.text.as_str(), matches!(l.severity, Severity::Err)))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                (
+                    "a key: deleting an Authenticator account finished after another key was selected",
+                    false
+                ),
+                (
+                    "a key: resetting the Authenticator failed after another key was selected: card removed",
+                    true
+                ),
+            ]
+        );
     }
 
     #[test]
