@@ -471,3 +471,31 @@ revision is byte-for-byte what was installed on this key.
 
 Start with step 1. Steps 2 and 3 need a disposable NEO; the current device's
 version and read-only interface observations remain the baseline.
+
+### OpenPGP source audit: first pass (2026-10-28)
+
+The public source was checked out at `cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4`,
+where the applet's `VERSION` constant is `01 00 11`. This identifies a useful
+source snapshot, **not** a verified image of the applet installed on the NEO.
+Compiled that snapshot with OpenJDK 21 and JCardSim 2.2.2 (the JAR matched the
+SHA-256 recorded in Yubico's `doc/Building.txt`). All 11 upstream simulator
+tests passed. Seven additional, temporary simulator probes passed, bringing
+the total to 18. These probes tested denial after a failed PW1 check, loss of
+signing authorization after reset or PW1 replacement, PW3 gates on generation,
+data writes, import and retry-setting, command chaining, and the secure
+messaging encryption-key setter. The temporary probes were run outside this
+repository and are not part of its test suite.
+
+| Source area | First-pass result | Evidence limit / next test |
+|---|---|---|
+| [Sign, decipher and authenticate](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L622) | Each private-key operation checks `pw1.isValidated()` and its required mode. The existing tests cover wrong/missing mode; additional simulator probes found no bypass after a failed PW1 check, card reset, or PW1 replacement. | This is a source/simulator result, not a claim about every command sequence or the installed binary. |
+| [Admin operations](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L963) | Key generation, PUT DATA, key import and retry-setting have PW3 checks; tested unauthorized calls were denied in the simulator. | Continue checking edge cases inside authenticated key import and reset paths. |
+| [Command chaining](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L429) | The intermediate-header check rejects a mismatch only when **both** INS and P1/P2 differ. A simulated chain with the same INS but changed P1/P2 was accepted; the final unauthorized PUT DATA was still denied by PW3. | A protocol-validation discrepancy is reproduced; no privilege bypass or security impact is established. |
+| [Secure-messaging encryption key](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPSecureMessaging.java#L167) | `PUT DATA D1` passes the start of the supplied key to `setSessionKeyEncryption`, but that method loads `offset + 16`; the `F4` container path also calls this setter. In JCardSim an admin-authorized 16-byte D1 write returned `9000`, while inspection of the simulator's encryption-key object found 16 zero bytes from the fresh buffer tail, rather than the supplied bytes. A separate direct-method test confirmed it loads the **second** 16 bytes when two distinct 16-byte blocks are present. | This is a reproducible public-source candidate, not a verified flaw on this physical NEO. Assess actual secure-messaging behavior and impact on a disposable NEO before making a device-vulnerability claim. |
+
+A read-only `GET DATA 006E` on the connected NEO returned `9000`; its extended
+capabilities advertised secure messaging (`C0` first byte `F0`, algorithm byte
+`00`, interpreted using the [OpenPGP Card 2.0 specification](https://gnupg.org/ftp/specs/openpgp-card-2.0.pdf)).
+That confirms the feature is advertised by this key, but does not prove
+that its implementation contains the public-source key-offset behavior. No
+admin PIN, SM key write, or credential operation was attempted on the key.
