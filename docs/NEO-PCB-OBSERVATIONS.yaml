@@ -182,12 +182,21 @@ conditional_pin_geometry:
     - datasheet top-view pin map is rotated clockwise 90 degrees to match the photo
   source: https://www.nxp.com/docs/en/data-sheet/LPC11U2X.pdf
   candidates:
+    - {pin: 2, function: RESET/PIO0_0, photo_side: top, approximate_pad_px: [650, 224]}
+    - {pin: 3, function: PIO0_1/ISP_entry, photo_side: top, approximate_pad_px: [638, 224]}
+    - {pin: 4, function: XTALIN, photo_side: top, approximate_pad_px: [626, 224]}
+    - {pin: 5, function: XTALOUT, photo_side: top, approximate_pad_px: [615, 224]}
+    - {pin: 6, function: VDD, photo_side: top, approximate_pad_px: [603, 224]}
     - {pin: 9, function: PIO0_3/USB_VBUS, photo_side: left, approximate_pad_px: [557, 247]}
     - {pin: 13, function: USB_DM, photo_side: left, approximate_pad_px: [557, 294]}
     - {pin: 14, function: USB_DP, photo_side: left, approximate_pad_px: [557, 305]}
-    - {pin: 4, function: XTALIN, photo_side: top, approximate_pad_px: [626, 224]}
-    - {pin: 5, function: XTALOUT, photo_side: top, approximate_pad_px: [615, 224]}
-  limit: candidate pad positions only; no pad-to-track or contact-to-pin net established
+    - {pin: 19, function: SWCLK/PIO0_10, photo_side: bottom, approximate_pad_px: [603, 356]}
+    - {pin: 25, function: SWDIO/PIO0_15, photo_side: right, approximate_pad_px: [682, 329]}
+    - {pin: 29, function: VDD, photo_side: right, approximate_pad_px: [682, 282]}
+    - {pin: 31, function: PIO0_18/RXD_UART_ISP, photo_side: right, approximate_pad_px: [682, 258]}
+    - {pin: 32, function: PIO0_19/TXD_UART_ISP, photo_side: right, approximate_pad_px: [682, 247]}
+    - {pin: 33, function: VSS_exposed_pad, photo_side: under_package, approximate_pad_px: null}
+  limit: candidate pad positions only; no pad-to-track, debug-pad, supply, or contact-to-pin net established
 unresolved:
   - USB contact order by VBUS, D-, D+, and GND on this photographed board
   - whether each R-L land is a plated via and which F-L land is its opposite-face endpoint

@@ -499,3 +499,28 @@ capabilities advertised secure messaging (`C0` first byte `F0`, algorithm byte
 That confirms the feature is advertised by this key, but does not prove
 that its implementation contains the public-source key-offset behavior. No
 admin PIN, SM key write, or credential operation was attempted on the key.
+
+### Controller debug pin targets (data sheet only)
+
+NXP's [HVQFN33 pin table](https://www.nxp.com/docs/en/data-sheet/LPC11U2X.pdf)
+gives the following LPC11U24 package terminals relevant to a non-erasing
+read-access check. The approximate image positions are added to the YAML map
+under its **conditional** package-identity and pin-1 assumptions. They identify
+package pads to look for during continuity work, not debug test pads or routed
+board nets.
+
+| Function | HVQFN33 pin(s) | Conditional photo side |
+|---|---:|---|
+| RESET | 2 | Top |
+| ISP entry `PIO0_1` | 3 | Top |
+| SWCLK | 19 | Bottom |
+| SWDIO | 25 | Right |
+| UART ISP RXD / TXD | 31 / 32 | Right |
+| VDD | 6 / 29 | Top / right |
+| VSS | 33, exposed pad under package | Not visible |
+
+NXP says a low level on `PIO0_1` during reset can enter its ISP command handler,
+and documents CRP levels that restrict SWD and ISP. This table does not show
+whether any of these terminals reach accessible points on the NEO board or
+whether code reads are permitted. Those questions require an opened spare and
+continuity plus non-erasing probe results.
