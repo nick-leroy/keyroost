@@ -149,9 +149,11 @@ plan's two-key manual steps were never executed):
 - **Linux hidraw bounded reads:** unplug a key mid-`fido info` — the command must
   error within the read budget, not hang.
 
-- **YubiKey NEO FIDO version query.** Yubico's old NEO Manager lists SELECT
-  `A0000006472F0001` then `00 42 00 00` for the U2F applet version; untested.
-  Needs a test on a real NEO before anyone builds it.
+- **YubiKey NEO FIDO version query.** SELECT `A0000006472F0001`
+  returned `U2F_V2` and `9000` on a real NEO, but the subsequent
+  `00 42 00 00` APDU returned `6D00` (unsupported instruction). Do not
+  implement that sequence as a version query without identifying the correct
+  transport and confirming it on hardware.
 
 **Feature verification:**
 

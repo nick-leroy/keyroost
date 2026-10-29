@@ -387,3 +387,59 @@ These steps would establish external PCB nets and operating-mode currents.
 They would still not disclose every transistor-level current path inside the
 NXP chips; that would require design information or destructive silicon
 analysis beyond a PCB teardown.
+
+## Firmware and vulnerability investigation starting point
+
+The NEO has **two distinct firmware targets**: LPC11U24 controller flash and
+the A7005 secure element/Java Card applets. A single “NEO firmware dump” is not
+one object. The [LPC11U2x data sheet](https://www.nxp.com/docs/en/data-sheet/LPC11U2X.pdf)
+documents SWD/ISP and code-read-protection levels that can block flash reads;
+the presence and level of protection on this NEO have not been measured. The
+public A700x short data sheet does not describe a memory-dump interface.
+
+The most tractable first code target is Yubico's published
+[NEO OpenPGP applet source](https://github.com/Yubico/ykneo-openpgp). Its
+[2015 advisory](https://developers.yubico.com/ykneo-openpgp/SecurityAdvisory%202015-04-14.html)
+documents a PIN-validation flaw in versions below 1.0.9, with some 1.0.9
+devices shipped without the fix; Yubico recommends 1.0.10 or later. Its
+[2018 OATH advisory](https://www.yubico.com/support/security-advisories/ysa-2018-01/)
+is another version-dependent NEO lead. Compare affected and fixed source and
+reproduce the authorization boundary in the applet's simulator tests before
+looking for new flaws. Neither advisory alone establishes a new vulnerability.
+
+Read-only probes completed so far: the user's FIDO AID SELECT returned
+`U2F_V2`/`9000`, then `00 42 00 00` returned `6D00`; on 2026-10-28 an OpenPGP
+AID SELECT returned `9000`, then Yubico's documented `00 F1 00 00` applet-version
+query returned `6D00` via `opensc-tool`. The FIDO query still gives no version;
+the OpenPGP failure did not establish an applet version or security defect.
+
+Further read-only identification on 2026-10-28:
+
+| Path | Observed result | Interpretation |
+|---|---|---|
+| Yubico [`ykinfo -q -v`](https://developers.yubico.com/yubikey-personalization/Manuals/ykinfo.1.html) | `3.4.9` | NEO product firmware version. |
+| `keyroostctl -d list:1 fido info` | CTAPHID protocol v2; HID device version `1.1.0`; `WINK+U2F`; no CTAP2 GetInfo | This interface is U2F-only. The [FIDO specification](https://fidoalliance.org/specs/fido-v2.0-rd-20161004/FIDO-COMPLETE-v2.0-rd-20161004.pdf) calls the three bytes a vendor-defined device version; `1.1.0` must not be substituted for the `3.4.9` product firmware version. |
+| Yubico's documented `gpg-connect-agent --hex 'scd apdu 00 f1 00 00' /bye` | `01 00 11 90 00` | OpenPGP applet `1.0.17`. The prior `opensc-tool` `6D00` is an unresolved tool/context difference. This applet version is above Yubico's known-fixed `1.0.10` threshold for the 2015 flaw. |
+| OATH applet SELECT `A000000527210101` via CCID | Version TLV `79` gave `1.0.0`; no challenge TLV `74` | Yubico's [OATH code](https://developers.yubico.com/yubikey-manager/API_Documentation/_modules/yubikit/oath.html) identifies `79` as the version and `74` as the access-password challenge. The optional OATH access password is currently unset. |
+
+The firmware and OATH applet versions are below the `3.5.0` and `1.0.1` fixes
+in Yubico's 2018 advisory. That is a **known affected version range**, but this
+key currently lacks the optional OATH password that the advisory says can be
+bypassed. We did not list OATH credentials or test the bypass. No PIN entry,
+firmware write, flash erase, or physical debug connection was attempted.
+
+**Next investigation steps:** first pin the public OpenPGP source to a revision
+whose `VERSION` constant is `01 00 11` (for example,
+[`cdf4c83`](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L47)),
+then audit PIN-validation and authorization state transitions with its simulator
+tests. A matching version constant does not prove that source is byte-for-byte
+what was installed on this key. Test the known OATH password issue only on a
+disposable key with test credentials; this key has no password to bypass.
+
+For a controller firmware-dump attempt, map the LPC11U24 SWD/ISP pads on an
+opened spare and check whether debug identification and read-only flash access
+are available. Stop at the protection boundary rather than invoking an erase
+or unlock operation. Treat the published
+[A7005 side-channel work](https://ninjalab.io/wp-content/uploads/2022/05/a_side_journey_to_titan.pdf)
+as a separate, higher-cost line of inquiry: full key recovery was demonstrated
+on a Titan, not on a NEO in that paper.
