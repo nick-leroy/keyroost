@@ -642,6 +642,30 @@ These observations are consistent with an unused OpenPGP applet but cannot
 prove that no private key or other hidden state exists. They say nothing about
 credentials or configuration in the other applications on this YubiKey.
 
+### Read-only PIV inventory (2026-10-29)
+
+The [PIV application AID](https://docs.yubico.com/yesdk/users-manual/application-piv/commands.html)
+selected with `9000`, and its version command returned `9000`. Read-only
+`GET DATA` requests for the four [NEO certificate
+slots](https://developers.yubico.com/PIV/Introduction/Certificate_slots.html)
+all returned `6A82` (object absent): authentication `9A` (`5FC105`), signature
+`9C` (`5FC10A`), key management `9D` (`5FC10B`), and card authentication `9E`
+(`5FC101`). The CCC (`5FC107`), CHUID (`5FC102`), key-history (`5FC10C`), and
+security (`5FC106`) objects likewise returned `6A82`; the factory discovery
+object (`7E`) returned `9000`. The [object IDs and read access
+rules](https://docs.yubico.com/yesdk/users-manual/application-piv/commands.html)
+come from Yubico's PIV documentation.
+
+No PIV PIN, PUK, or management-key authentication was attempted, so these
+reads did not spend PIN retries. No certificate, CHUID, serial, or other
+response payload was printed or saved. The missing certificates and data
+objects are consistent with an unprovisioned PIV applet. They cannot prove
+private-key slots are empty: the NEO predates Yubico's [per-slot metadata
+command](https://docs.yubico.com/yesdk/users-manual/application-piv/commands.html),
+which is documented for YubiKey 5.3 and later. The factory PIV PIN and
+management key are documented defaults, but whether this unit still uses them
+has not been tested.
+
 ### Retry counters and memory-safety audit (2026-10-29)
 
 The user subsequently authorized testing or provisioning the connected NEO,
