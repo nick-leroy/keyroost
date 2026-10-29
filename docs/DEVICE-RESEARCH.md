@@ -428,18 +428,46 @@ key currently lacks the optional OATH password that the advisory says can be
 bypassed. We did not list OATH credentials or test the bypass. No PIN entry,
 firmware write, flash erase, or physical debug connection was attempted.
 
-**Next investigation steps:** first pin the public OpenPGP source to a revision
-whose `VERSION` constant is `01 00 11` (for example,
-[`cdf4c83`](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L47)),
-then audit PIN-validation and authorization state transitions with its simulator
-tests. A matching version constant does not prove that source is byte-for-byte
-what was installed on this key. Test the known OATH password issue only on a
-disposable key with test credentials; this key has no password to bypass.
+### Investigation plan
 
-For a controller firmware-dump attempt, map the LPC11U24 SWD/ISP pads on an
-opened spare and check whether debug identification and read-only flash access
-are available. Stop at the protection boundary rather than invoking an erase
-or unlock operation. Treat the published
-[A7005 side-channel work](https://ninjalab.io/wp-content/uploads/2022/05/a_side_journey_to_titan.pdf)
-as a separate, higher-cost line of inquiry: full key recovery was demonstrated
-on a Titan, not on a NEO in that paper.
+The goals are to establish whether either chip's code can be read and to find
+reproducible security defects in the NEO's exposed applications. Keep product
+firmware, each applet version, public source revision, and physical board
+revision separate. A matching version constant does not prove a public source
+revision is byte-for-byte what was installed on this key.
+
+1. **Audit the published OpenPGP applet offline.** Pin a source revision whose
+   `VERSION` constant is `01 00 11` (for example,
+   [`cdf4c83`](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L47)).
+   Inventory command dispatch, private-key operations, PIN verification and
+   retry handling, authentication state transitions, reset paths, and key
+   import. Compare the known 2015 fix with earlier and later code. Record
+   specific hypotheses and the tests that would distinguish them; run the
+   repository's Java Card simulator tests where its dependencies are available.
+   **Output:** source-referenced findings, test results, and an explicit
+   source-to-device uncertainty statement.
+2. **Validate only credible hypotheses on disposable hardware.** If an offline
+   test suggests a flaw, use a separate NEO with test keys and credentials to
+   compare expected and observed APDU outcomes. Do not exercise PIN retries,
+   credential access, reset, or applet writes on the currently connected key.
+   The known OATH password issue can only be meaningfully tested on a spare
+   deliberately configured with an OATH access password. **Output:** a minimal
+   reproducible trace, affected version, and impact; otherwise record the
+   negative result and its scope.
+3. **Assess an LPC11U24 firmware read on an opened spare.** Record its exact
+   markings and PCB revision, then map SWDIO, SWCLK, RESET, ISP entry, supply,
+   and ground by pinout plus continuity. Check logic voltage before attaching
+   a probe. Attempt only non-erasing identification and read access; record the
+   observed protection boundary. If reads are permitted, take two dumps and
+   compare hashes before analyzing the image. Do not use an unlock or mass
+   erase command to claim a dump. **Output:** a pin-level evidence map and
+   either a verified image or a documented read barrier.
+4. **Keep the A7005 as a separate research track.** Map its board interface
+   before attributing observed traffic to a chip or applet. Assess the
+   published [A7005 side-channel work](https://ninjalab.io/wp-content/uploads/2022/05/a_side_journey_to_titan.pdf)
+   against this NEO revision and threat model; full key recovery in that paper
+   was demonstrated on a Titan, not on a NEO. **Output:** a justified next
+   experiment, without treating a chip-family result as a NEO exploit.
+
+Start with step 1. Steps 2 and 3 need a disposable NEO; the current device's
+version and read-only interface observations remain the baseline.
