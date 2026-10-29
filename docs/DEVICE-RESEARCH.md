@@ -615,6 +615,33 @@ malformed-length exceptions or partially completed RSA imports affect
 integrity or availability on a spare key. The current evidence does not make
 an out-of-bounds exception into arbitrary memory access or a firmware dump.
 
+### What the OpenPGP admin PIN reveals
+
+PW3 authorizes OpenPGP management operations in this applet; the read-only
+[`GET DATA` objects](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L751)
+and public-key reads do not require PW3. The factory PIN therefore adds
+management access, not an export command for private keys or firmware. It does
+not authenticate the NEO's PIV, OTP, or U2F applications.
+For this model, [PIV has separate factory PIN, PUK, and management-key
+values](https://developers.yubico.com/PIV/Introduction/YubiKey_and_PIV.html);
+none was tried on this key. [OATH can have a user-set validation
+code](https://developers.yubico.com/OATH/YKOATH_Protocol.html), and [OTP slots
+can have individual configuration access
+codes](https://docs.yubico.com/yesdk/users-manual/application-otp/how-to-slot-access-codes.html).
+The NEO's [U2F-only FIDO feature has no client
+PIN](https://developers.yubico.com/WebAuthn/WebAuthn_Browser_Support/).
+
+A fresh read-only OpenPGP inventory returned `9000` for the login, URL,
+cardholder, application-data, certificate, signature-counter, and PIN-status
+objects. The login and URL data were empty; the cardholder name field and
+certificate value were empty. All three key fingerprints, all three CA
+fingerprints, and all three key-generation timestamps were zero. The signature
+counter was zero. Each of the signature, decryption, and authentication
+public-key read commands returned `6F00`, and retries remained `(3, 3, 3)`.
+These observations are consistent with an unused OpenPGP applet but cannot
+prove that no private key or other hidden state exists. They say nothing about
+credentials or configuration in the other applications on this YubiKey.
+
 ### Retry counters and memory-safety audit (2026-10-29)
 
 The user subsequently authorized testing or provisioning the connected NEO,
