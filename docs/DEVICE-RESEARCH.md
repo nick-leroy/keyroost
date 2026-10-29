@@ -479,8 +479,8 @@ where the applet's `VERSION` constant is `01 00 11`. This identifies a useful
 source snapshot, **not** a verified image of the applet installed on the NEO.
 Compiled that snapshot with OpenJDK 21 and JCardSim 2.2.2 (the JAR matched the
 SHA-256 recorded in Yubico's `doc/Building.txt`). All 11 upstream simulator
-tests passed. Seven additional, temporary simulator probes passed, bringing
-the total to 18. These probes tested denial after a failed PW1 check, loss of
+tests passed. Eight additional, temporary simulator probes passed, bringing
+the total to 19. These probes tested denial after a failed PW1 check, loss of
 signing authorization after reset or PW1 replacement, PW3 gates on generation,
 data writes, import and retry-setting, command chaining, and the secure
 messaging encryption-key setter. The temporary probes were run outside this
@@ -499,6 +499,39 @@ capabilities advertised secure messaging (`C0` first byte `F0`, algorithm byte
 That confirms the feature is advertised by this key, but does not prove
 that its implementation contains the public-source key-offset behavior. No
 admin PIN, SM key write, or credential operation was attempted on the key.
+
+### No-open follow-up for the secure-messaging key offset
+
+Opening the device is unavailable, so the LPC11U24 debug-pin route cannot be
+executed. The key-offset question remains an **in-band OpenPGP applet** question;
+it does not provide an LPC flash-read command or a secure-element firmware dump.
+
+An added simulator sequence sent an unauthenticated `GET DATA` with an invalid
+tag and 32 chosen data bytes. The applet returned `6A83`, but its
+[`commandChaining`](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L417)
+method had already copied those bytes into the shared buffer. After a separate
+successful **simulated** PW3 verification and a 16-byte `PUT DATA D1`, the
+simulator's encryption-key object contained the chosen bytes from buffer
+positions 16–31, not the 16 bytes supplied in D1. Thus the source-level
+misassignment can be steered by an earlier APDU **within one selected applet
+session**. D1 still requires valid PW3; this does not show a PIN bypass.
+
+The source creates the APDU buffer with `JCSystem.CLEAR_ON_DESELECT` and the DES
+keys with `KeyBuilder.TYPE_DES_TRANSIENT_DESELECT`. [Oracle's Java Card API](https://docs.oracle.com/en/java/javacard/3.1/jc_api_srvc/api_classic/javacard/framework/JCSystem.html)
+and [KeyBuilder documentation](https://docs.oracle.com/en/java/javacard/3.1/jc_api_srvc/api_classic/javacard/security/KeyBuilder.html)
+say those values clear on deselection or reset. A separate JCardSim 2.2.2 test
+unexpectedly retained the buffer after simulated reset and applet switch; that
+test is excluded from the passing count because it conflicts with the Java
+Card lifetime contract and cannot establish what the NEO does across sessions.
+
+**Next test without opening:** on an unopened *disposable* NEO, set test-only
+OpenPGP credentials, authenticate PW3, provision a test SM encryption key, and
+compare a known SM response against the supplied key and the predicted buffer
+tail. Keep all APDUs in one controlled card session, then reselect and check
+whether the effect disappears. This would distinguish a real-device key
+misassignment from a simulator-only artifact. It must also show a completed SM
+exchange and a concrete confidentiality or integrity consequence before being
+called a security vulnerability. No such test was run on the connected key.
 
 ### Controller debug pin targets (data sheet only)
 
