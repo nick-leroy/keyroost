@@ -581,6 +581,32 @@ also needs evidence that a client uses SM and that an observer can recover data
 the client intended to keep confidential. No such test was run on the connected
 key.
 
+### Retry counters and memory-safety audit (2026-10-29)
+
+The user subsequently authorized testing or provisioning the connected NEO,
+while preferring to preserve its contents. Its Admin PW3 is unknown. This pass
+used read-only status commands and one malformed secure-messaging command on
+the physical key. It made **no PIN guesses, applet reset, key write, or import**.
+`GET DATA C4` reported three tries each for PW1, the resetting code, and PW3.
+The three OpenPGP fingerprint slots were zero and public-key read requests
+returned `6F00`; this suggests no keys but does not prove the applet is empty.
+
+| Area checked | Result | Scope and limit |
+| --- | --- | --- |
+| [VERIFY and retry state](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L491) | In JCardSim, a short PW3 request did not spend a try; a wrong, valid-length PIN moved the counter from 3 to 2, which persisted after simulator reset; the correct test PIN restored 3. A chained VERIFY's intermediate `9000` did not authorize; its failing final segment spent one try. | No wrong PIN was submitted to the NEO. [Java Card `OwnerPIN.check`](https://docs.oracle.com/en/java/javacard/3.1/jc_api_srvc/api_classic/javacard/framework/OwnerPIN.html) requires failed checks to decrement outside transactions. |
+| Counter reset paths | A wrong old PW3 in `CHANGE REFERENCE DATA` spent one simulator try. Unauthenticated `RESET RETRY COUNTER` and vendor `F2 SET RETRIES` did not restore it. A configured resetting code had a separate counter that persisted across simulator reset. | `TERMINATE DF` plus `ACTIVATE FILE` can restore counters after PW1 and PW3 are blocked, but wipes the OpenPGP applet; it does not allow unlimited guesses against retained keys. |
+| [SM length and integer wrap](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPSecureMessaging.java#L196) | Forged `DO87` length `0x7FFF` wraps a `short` cursor to a negative index. An instrumented simulator subclass caught `ArrayIndexOutOfBoundsException`; the original simulator returned `6F00` and stayed responsive. After `GET CHALLENGE`, the real NEO returned `6F00` to `0C CA 00 4F 05 87 82 7F FF 01`, then answered `GET DATA C4` with all tries still at 3. | The physical `6F00` does not identify its internal exception. [Java Card VM bounds checks](https://docs.oracle.com/en/java/javacard/3.1/jc-vm-spec/F12650_05.pdf) prevent treating the source-level indexing error as an arbitrary memory read or write. |
+| [Key-import BER length](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L1172) | A forged template length `0x7FFF` also triggered an instrumented array-bounds exception. The simulated applet remained responsive. | Import requires PW3; it was not exercised on hardware. Sequential RSA component setters are outside a transaction, so partial key state after a later error remains an open integrity question. |
+| Short key fields and stale memory | Admin-authorized simulator `PUT DATA D1` accepted tested lengths 0, 1, 15, 16, 17, 31 and 32; `F4` accepted one- and two-byte bodies. Neither validates the complete key field before using the shared buffer. The key-offset tests above show the resulting stale-byte behavior. | This is an input-validation and state-use defect in the applet source, not evidence of a native heap overflow. |
+| Chaining and maximum buffer | A 1,216-byte chained certificate write succeeded in the simulator; its 1,221-byte TLV response completed through `GET RESPONSE`. A 1,217-byte write was rejected. | This checks the documented certificate and shared-buffer boundary, not every APDU sequence. |
+| Heap, stack, and object lifetime | The three Java classes use bounded arrays, have no attacker-controlled recursion or manual free, and request Java Card object deletion only on reset/retry changes. [The API](https://docs.oracle.com/en/java/javacard/3.1/jc_api_srvc/api_classic/javacard/framework/JCSystem.html) reclaims only unreferenced objects. No use-after-free or double-free path was identified in this applet source. | The NEO's Java Card runtime, secure-element internals, and LPC controller firmware are outside this source audit. Their memory safety cannot be inferred from the applet. |
+
+The pinned-source JCardSim suite passed 28 tests; one session-clearing test
+remains ignored because JCardSim 2.2.2 disagreed with the Java Card
+`CLEAR_ON_DESELECT` contract. Structured malformed-length probes returned
+errors while the simulated applet stayed responsive. This is bounded coverage,
+not a claim that all malformed APDUs or hardware faults have been exhausted.
+
 ### Controller debug pin targets (data sheet only)
 
 NXP's [HVQFN33 pin table](https://www.nxp.com/docs/en/data-sheet/LPC11U2X.pdf)
