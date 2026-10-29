@@ -207,3 +207,183 @@ Outline for a future Claude (don't over-research — breadth first, depth later)
 
 A per-device capability → everyday-use → plain-English-benefit table that the
 future UI-guidance work draws from. Capture it here as the research progresses.
+
+---
+
+# YubiKey NEO PCB trace review (2026-10-28)
+
+Sources: the [HexView NEO teardown](https://web.archive.org/web/20170926081041/http://www.hexview.com/~scl/neo/) ([original](https://hexview.com/~scl/neo/)) and archived
+copies of its [component-side](https://web.archive.org/web/20170917163058im_/http://www.hexview.com/~scl/neo/neo_pcb_s.jpg)
+and [reverse-side](https://web.archive.org/web/20170917163058im_/http://www.hexview.com/~scl/neo/neo_pcb_back_s.jpg)
+photos (1024 × 408 and 1024 × 411 pixels). The archive supplied the images for
+this review when the original image host did not respond. This is one opened
+NEO board, not evidence that every hardware revision has identical routing.
+HexView's separately titled ["YubiKey 5 Neo" teardown](https://www.hexview.com/~scl/neo5/)
+shows a later, different board and is not used as NEO trace evidence here.
+
+## Recording convention
+
+Use the PCB terms **pad**, **track segment**, **via**, **layer**, and **net** as
+defined by [KiCad's board format](https://dev-docs.kicad.org/en/file-formats/sexpr-pcb/).
+Here, *visible* means a feature can be located in one of the linked photos;
+*source-attributed* means HexView assigns it a function; *electrically verified*
+would require a continuity or signal measurement. There are no electrically
+verified NEO nets in this record. A visible line or adjacent pad is not, by
+itself, proof of electrical continuity. Small circular features in the photos
+are **via candidates** until both sides or a measurement confirm their role.
+
+The [machine-readable observation map](NEO-PCB-OBSERVATIONS.yaml) identifies the
+photo, board face, feature ID, and approximate pixel positions with the image
+origin at its upper-left corner. The two faces require a measured reflection
+and registration before a front/back overlay; their similar published
+orientations do not supply that transform. Keep millimetre dimensions and net
+names unset until a physical scale and electrical connectivity are established;
+do not manufacture precision from these photos.
+
+## Visible in the two photos
+
+- The component side shows multiple closely spaced perimeter conductors,
+  traces and via candidates around the two main IC packages, an LED, and a
+  metal-can component above the USB-side IC. [NinjaLab's later annotated
+  presentation](https://hardwear.io/wp-content/uploads/2026/04/security-of-Hardware-FIDO2-tokens.pdf)
+  identifies the metal-can component as a quartz resonator; the photo does not
+  establish its frequency.
+  The photo labels the left IC as an NXP A7005 and the right IC as the main
+  USB controller. The USB plug is at the right in the published orientation.
+- The reverse side shows four USB contact pads, a large circular copper
+  feature at the touch position, patterned copper regions, perimeter copper,
+  and several via candidates. These are visual locations only: the photo does not prove
+  which copper features belong to a particular electrical net.
+
+## Paths identified by the teardown
+
+| Area | Supported claim | Evidence and limit |
+|---|---|---|
+| NFC antenna at the keyring hole | Antenna conductors run between the keyring hole and the outer PCB edge. | HexView identifies this path and reports that Yubico's CTO acknowledged the routing compromise. The acknowledgement is reported by HexView, not an independently published board drawing. The photos do not establish the complete antenna net or its chip pin. |
+| Neck near the USB plug | The NFC loop and vias that HexView calls USB vias cross the area it identified as bending most when the touch contact is pressed while plugged in. A molding hole sits near the connector. | This is HexView's mechanical assessment of one board. It does not identify USB D+, D−, power, or ground by pad or via. HexView reports agreement with Yubico's CTO that ordinary use was unlikely to cause the proposed bending damage. The keyring-hole risk concerned excessive force; HexView also reports that Yubico had seen no warranty returns for that damage at the time. |
+| Two-chip boundary | HexView labels the left IC as an NXP A7005 secure controller. The 2017 archived article gives only a tentative LPC13xx estimate for the right IC. [NXP identifies](https://www.nxp.com/company/about-nxp/smarter-world-videos/CONTACT-AND-CONTACTLESS-KEY) the Yubico cloud key's bundle as A7005/LPC11U24, and [NinjaLab identifies](https://hardwear.io/wp-content/uploads/2026/04/security-of-Hardware-FIDO2-tokens.pdf) those two parts on the NEO using this photo. | LPC11U24 is supported by the chip manufacturer and a later research presentation, stronger than HexView's tentative archived estimate. The exact orderable suffix on this opened unit and the electrical protocol between chips remain unverified. |
+
+Search indexing of the [currently published HexView page](https://hexview.com/~scl/neo/)
+also reports `LPC11U24FHI33/CP3303` in its parts estimate. The archived 2017
+text used above does not contain that revision, and the current host timed out
+during direct inspection. Treat the suffix as a later teardown attribution,
+not as a marking read independently from the pixels in this review.
+
+## Photo-grounded partial interface map
+
+IDs and pixel positions below refer to the linked photos, **not** to chip pin
+numbers or measured board coordinates. The corresponding records in
+[NEO-PCB-OBSERVATIONS.yaml](NEO-PCB-OBSERVATIONS.yaml) distinguish a visible
+same-face copper segment from a proposed cross-face connection.
+
+| Visible segment or adjacency | What it establishes | Where the map stops |
+|---|---|---|
+| On the reverse, each of the four USB contacts (R-J1-1 through R-J1-4, top to bottom) has a short copper stub to a round land immediately to its left (R-L1 through R-L4, near x=750). | Four separate contact-to-land segments are visually contiguous in the reverse photo. | The round lands are via **candidates**. The front-face endpoints and the assignment of power, D−, D+, and ground are unverified. |
+| A similar four-land pattern (F-L1 through F-L4, x≈743) appears around the same connector hole on the component face. | These sets plausibly represent the two ends of four through-board connections. | Reflection and registration of the photos or continuity measurements are needed to pair individual R-L and F-L lands; apparent holes alone do not prove plating. |
+| On the component face, several tracks leave the right edge of the USB-controller package (F-U2) and run toward the connector neck, with round lands along that route. | The USB-side chip is visibly routed into the connector-side region. | This fan cannot be labelled USB D+/D−: the conditional LPC11U24 pin placement below puts those two pins on the chip's *left* edge. No U2 pad is paired with a USB contact. |
+| Tracks leave the right and bottom edges of the secure-element package (F-U1) into the passives and round-land cluster between the two ICs. | The secure element has visible local board connections on those package sides. | Tracks disappear under parts and at candidate vias. No particular U1 pad has been linked to a particular U2 pad or signal. |
+| The metal-can component above F-U2 has visible tracks descending toward its top-edge pad area. | A component-to-controller route is visible; NinjaLab identifies the part as a quartz resonator. | Its frequency and exact pad-to-pin assignment are not established from this image. |
+| The reverse touch disc and perimeter conductors are visible. HexView identifies the latter as an NFC antenna route at the keyring hole and connector neck. | These are board features with plausible functional roles supported by the teardown. | Neither the touch-disc net nor the antenna terminal-to-A7005 route is traced to a chip pad. |
+
+The [LPC11U2x HVQFN33 pin diagram](https://www.nxp.com/docs/en/data-sheet/LPC11U2X.pdf)
+offers a **conditional pin placement**, recorded in the YAML. If the photo's
+upper-right package dot is pin 1, rotate NXP's top-view diagram 90° clockwise:
+the multiplexed PIO0_3/USB_VBUS pin 9 is near the upper left edge; USB_DM pin
+13 and USB_DP pin 14 are near the lower-middle left edge; and XTALIN pin 4 and
+XTALOUT pin 5 are along the top edge. NXP's bus-powered example does not use
+pin 9 as VBUS sensing, so its name alone cannot label a trace. Approximate
+image coordinates are in the YAML. This placement is useful for targeting a
+continuity test, but it does **not** prove package orientation, a track
+assignment, or a USB contact-to-pin path.
+
+NXP's public A700x **short** data sheet describes A7005 interface capabilities
+but does not provide a package pin map for this photographed variant. We
+therefore cannot use that document to name the A7005 pads reached by the
+visible traces.
+
+**Result:** we have a partial *image observation graph*, not a chip-to-chip
+netlist. The most concrete mapped chain is each USB contact to its adjacent
+round land on the reverse face. The front and reverse four-land groups may
+match, but no individual cross-face connection or end-to-end USB, NFC, touch,
+power, or inter-chip net is established.
+
+## What the two chips do
+
+| Photo position | Supported functional role | Chip capability, not a measured NEO connection |
+|---|---|---|
+| Left, toward the keyring hole | NXP A7005-family secure element. [Yubico's NEO manual](https://downloads.yubico.com/support/yubico_YubiKey-Technical-Manual-v3.3_2014.pdf) says the secure element stores and processes cryptographic information and runs Java Card 3.0 / JCOP 2.4.2 R1 applets. | NXP's [A700x family data sheet](https://media.digikey.com/pdf/Data%20Sheets/NXP%20PDFs/A700x_Rev3.1.pdf) specifies a secure CPU, cryptographic coprocessors, I²C/SCI2C, ISO/IEC 7816 contact and ISO/IEC 14443 A contactless interfaces for A7005. This supports a functional connection to NFC and smartcard traffic, but does not identify antenna pins or board traces. The exact A7005 suffix on this photographed unit remains unverified. |
+| Right, toward the USB contacts | USB interface controller identified as an LPC11U24 by [NXP](https://www.nxp.com/company/about-nxp/smarter-world-videos/CONTACT-AND-CONTACTLESS-KEY) and [NinjaLab](https://hardwear.io/wp-content/uploads/2026/04/security-of-Hardware-FIDO2-tokens.pdf). Yubico separately describes the NEO's USB-side chip as a non-secure controller. | The [LPC11U2x data sheet](https://www.nxp.com/docs/en/data-sheet/LPC11U2X.pdf) specifies full-speed USB, USART/smartcard, I²C and SSP for the family. The exact orderable variant and which of those interfaces link to the A7005 remain unverified. |
+
+Yubico's NEO manual says that USB CCID passes smartcard commands to the secure
+element, while OTP and U2F activity also use that resource; in composite mode,
+CCID can temporarily report card removal while another interface is active.
+It also says NFC uses an ISO 14443-4 command set matching CCID. This is a
+**documented functional path**, not a traced electrical schematic.
+
+## Where charge and signals can flow
+
+This separates **energy paths**, **signal paths**, and **application behavior**.
+The first two require closed electrical or electromagnetic paths; a protocol
+description alone cannot assign a copper net. The table describes the NEO's
+USB and NFC operating modes using the [NEO manual](https://downloads.yubico.com/support/yubico_YubiKey-Technical-Manual-v3.3_2014.pdf),
+[NXP LPC11U2x data sheet](https://www.nxp.com/docs/en/data-sheet/LPC11U2X.pdf),
+and [NXP A700x data sheet](https://media.digikey.com/pdf/Data%20Sheets/NXP%20PDFs/A700x_Rev3.1.pdf).
+
+| Function | Supported system-level path | Physical route still missing |
+|---|---|---|
+| USB power | With the NEO plugged in, the host's USB supply must power the controller and active secure element, with current returning to the host through USB ground. An LPC11U24 VDD pin cannot take the USB 5 V supply directly: its data sheet specifies a lower VDD range and illustrates external power conditioning for a bus-powered USB device. | Which contact is VBUS or ground in the photo; regulator or protection part identity; rail voltage; component power pins; ground-return copper. The photo is insufficient to name a specific SOT package as a regulator. |
+| USB signalling | The USB D+/D− pair carries host traffic to the LPC11U24 USB device controller. Yubico says the controller translates YubiKey-mode traffic and forwards CCID commands to the secure element; OTP, U2F, and CCID share it. | Contact-to-controller D+/D− nets and the electrical controller-to-A7005 link. The NEO's reported T=1 smartcard behavior does not by itself prove an ISO 7816 wire between the chips. A7005 supports both I²C/SCI2C and ISO 7816; no protocol has been assigned to the board traces. |
+| Touch and LED | Yubico describes a solid-state capacitive touch sensor for USB operation; its manual defines LED behavior for enumeration, CCID, and U2F. The large reverse copper disc is at the touch location, and an LED is visible on the component face. | Electrode-to-sensing input, sensing chip, LED driver, series components, and return path. Touch is sensed through a changing electric field, not a DC wire through the finger. |
+| NFC, unplugged | Yubico says NFC is enabled when the NEO is not plugged into USB, using ISO 14443 A/4 and the same command set as CCID; its button and LED are disabled in NFC mode. The A7005 has the matching contactless interface. Reader RF energy couples to the board antenna and supports contactless operation; response data is conveyed by RF coupling. | Antenna terminals, matching/tuning parts, RF rectification and power rails on this board, and any path into the USB controller. No conduction path runs from reader to key across the air gap. |
+| Local clock and computation | The LPC11U24 uses clock circuitry and the A7005 executes Java Card applets and cryptography. NinjaLab identifies the metal-can part as a quartz resonator. | Resonator frequency and exact pins; internal transistor-level current paths in either IC; any exact board-level activity during a particular command. |
+
+The USB and NFC paths are **different power situations**. A USB capture or APDU
+response can establish command behavior but cannot reveal the hidden supply,
+ground, antenna, or inter-chip nets. Conversely, the photos show copper but not
+whether a particular net is carrying current at a given instant. A complete
+board netlist would still be less than a literal map of every electron inside
+the two ICs.
+
+HexView's separate [Titan comparison](https://hexview.com/~scl/titan/)
+identifies the NEO's secure element as an A7005c, but the suffix is not
+confirmed from this board photo. [NinjaLab's A700x study](https://ninjalab.io/wp-content/uploads/2022/05/a_side_journey_to_titan.pdf)
+recovered a U2F private key from a Google Titan with an A7005a and listed the
+NEO as a likely affected product. The full key-recovery experiment was not
+performed on a NEO. This is chip-family security evidence, not a measurement
+of this particular key or its traces.
+
+**Not established:** exact antenna turn count and full routing; USB pad-to-pin
+connections beyond the adjacent round lands; the function of the patterned
+copper and individual vias; touch, power, and inter-chip nets; or the PCB layer
+stack. The photos have no scale or registered front/back overlay, and narrow
+tracks vanish under packages or at vias. We have not probed this board
+electrically. The prior `opensc-tool` APDU
+exchange establishes software behavior at the CCID interface, not a physical
+trace route. A pin-level map would need aligned close-up images plus continuity
+measurements on an opened spare key; hidden routes would need further imaging.
+
+### Measurements needed for a complete board map
+
+1. Record the exact NEO hardware revision, readable IC markings and pin-1
+   indicators, then photograph both faces square-on with a scale and common
+   fiducials. Register the two images; determine the face reflection from an
+   asymmetric physical feature, not the nearly symmetric hole pattern alone.
+2. On an **unpowered opened spare**, test each USB contact against the four
+   adjacent lands, their candidate opposite-face lands, LPC11U24 USB_DM/USB_DP
+   candidate pads, power components, and accessible ground copper. Record
+   continuity, non-continuity, and meter polarity; do not assume that a round
+   land is a via because it looks drilled.
+3. Read component markings and measure USB-mode rail voltages and current with
+   suitable probes. Observe the controller-to-secure-element lines during a
+   benign CCID exchange to determine whether the actual wiring carries I²C,
+   ISO 7816, or another interface. A bus protocol cannot be chosen from the
+   chips' feature lists or the host's CCID/T=1 descriptor.
+4. Trace both NFC antenna terminals and their matching network to the A7005,
+   then compare powered-USB and unplugged-NFC behavior. If tracks disappear
+   under packages or inside the board, use X-ray/CT or cross-section imaging
+   before declaring a complete netlist.
+
+These steps would establish external PCB nets and operating-mode currents.
+They would still not disclose every transistor-level current path inside the
+NXP chips; that would require design information or destructive silicon
+analysis beyond a PCB teardown.

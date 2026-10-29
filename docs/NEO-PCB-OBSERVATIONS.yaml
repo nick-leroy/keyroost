@@ -1,0 +1,200 @@
+# Image observation graph for the NEO board pictured by HexView.
+# Pixel positions are approximate waypoints for reinspection, not PCB dimensions.
+# No observed connection establishes a net, package pin identity, or layer transition.
+# Candidate MCU pin numbers below depend on explicit identity/orientation assumptions.
+schema_version: 1
+board_sample: HexView YubiKey NEO teardown, one opened unit
+sources:
+  front:
+    url: https://web.archive.org/web/20170917163058im_/http://www.hexview.com/~scl/neo/neo_pcb_s.jpg
+    width_px: 1024
+    height_px: 408
+    description: component face; USB plug at right
+  reverse:
+    url: https://web.archive.org/web/20170917163058im_/http://www.hexview.com/~scl/neo/neo_pcb_back_s.jpg
+    width_px: 1024
+    height_px: 411
+    description: contact and touch face; USB plug at right
+  nxp_bundle:
+    url: https://www.nxp.com/company/about-nxp/smarter-world-videos/CONTACT-AND-CONTACTLESS-KEY
+    description: NXP identifies the Yubico cloud key A7005/LPC11U24 chip bundle
+  nxp_lpc_pinout:
+    url: https://www.nxp.com/docs/en/data-sheet/LPC11U2X.pdf
+    description: HVQFN33 top-view pin diagram, page 5
+  ninjalab_neo:
+    url: https://hardwear.io/wp-content/uploads/2026/04/security-of-Hardware-FIDO2-tokens.pdf
+    description: 2022 presentation, slide 17, identifies NEO parts using the HexView photo
+coordinate_convention: origin at upper left of each published image; x right, y down
+face_registration: unknown; do not equate same x/y on opposite faces
+evidence_terms:
+  visible: feature or apparent same-face copper continuity in the photograph
+  source_attributed: function assigned by HexView or NinjaLab, without electrical verification
+  manufacturer_documented: function or part identity asserted by NXP or Yubico
+  conditional_inference: follows only if its listed package and orientation assumptions hold
+  electrically_verified: continuity or signal measurement; none recorded here
+features:
+  - id: F-U1
+    face: front
+    kind: package
+    approximate_box_px: [189, 143, 307, 274]
+    identity: NXP A7005 secure element
+    evidence: source_attributed
+  - id: F-U2
+    face: front
+    kind: package
+    approximate_box_px: [559, 221, 682, 356]
+    identity: NXP LPC11U24 family USB interface controller; exact orderable variant unverified
+    evidence: manufacturer_documented
+  - id: F-PASSIVES
+    face: front
+    kind: region
+    approximate_box_px: [347, 148, 555, 350]
+    description: discrete parts and round lands between the IC packages
+    evidence: visible
+  - id: F-METAL-CAN
+    face: front
+    kind: component
+    approximate_box_px: [566, 148, 653, 199]
+    identity: quartz resonator according to NinjaLab's annotated reuse of the teardown photo
+    evidence: source_attributed
+  - id: F-L1
+    face: front
+    kind: round_land_via_candidate
+    approximate_center_px: [743, 144]
+    evidence: visible
+  - id: F-L2
+    face: front
+    kind: round_land_via_candidate
+    approximate_center_px: [743, 164]
+    evidence: visible
+  - id: F-L3
+    face: front
+    kind: round_land_via_candidate
+    approximate_center_px: [743, 249]
+    evidence: visible
+  - id: F-L4
+    face: front
+    kind: round_land_via_candidate
+    approximate_center_px: [743, 269]
+    evidence: visible
+  - id: R-J1-1
+    face: reverse
+    kind: usb_contact
+    approximate_center_px: [877, 126]
+    order: top
+    evidence: visible
+  - id: R-J1-2
+    face: reverse
+    kind: usb_contact
+    approximate_center_px: [877, 178]
+    order: second
+    evidence: visible
+  - id: R-J1-3
+    face: reverse
+    kind: usb_contact
+    approximate_center_px: [877, 227]
+    order: third
+    evidence: visible
+  - id: R-J1-4
+    face: reverse
+    kind: usb_contact
+    approximate_center_px: [877, 279]
+    order: bottom
+    evidence: visible
+  - id: R-L1
+    face: reverse
+    kind: round_land_via_candidate
+    approximate_center_px: [750, 138]
+    evidence: visible
+  - id: R-L2
+    face: reverse
+    kind: round_land_via_candidate
+    approximate_center_px: [750, 160]
+    evidence: visible
+  - id: R-L3
+    face: reverse
+    kind: round_land_via_candidate
+    approximate_center_px: [750, 244]
+    evidence: visible
+  - id: R-L4
+    face: reverse
+    kind: round_land_via_candidate
+    approximate_center_px: [750, 263]
+    evidence: visible
+  - id: R-TOUCH-DISC
+    face: reverse
+    kind: copper_region
+    approximate_box_px: [319, 89, 545, 316]
+    description: large exposed circular region at touch location
+    evidence: visible
+  - id: R-KEYRING-PERIMETER
+    face: reverse
+    kind: copper_route_region
+    approximate_box_px: [23, 23, 248, 385]
+    description: copper passes between keyring hole and board edge
+    evidence: visible
+observations:
+  - id: usb_contact_stubs
+    relation: visually_contiguous_on_reverse_face
+    pairs:
+      - [R-J1-1, R-L1]
+      - [R-J1-2, R-L2]
+      - [R-J1-3, R-L3]
+      - [R-J1-4, R-L4]
+    limit: round lands are via candidates; destinations and USB signal names unknown
+  - id: neck_four_land_pattern
+    relation: candidate_group_cross_face
+    front_features: [F-L1, F-L2, F-L3, F-L4]
+    reverse_features: [R-L1, R-L2, R-L3, R-L4]
+    evidence: visible
+    limit: similar four-land pattern around the same connector hole; individual pairings require face registration or continuity
+  - id: controller_east_fan
+    relation: visible_track_fan
+    feature: F-U2
+    package_sides: [right]
+    approximate_route_region_px: [680, 240, 752, 343]
+    toward: connector neck and local round lands
+    limit: cannot label these tracks D+/D-; candidate LPC11U24 pinout places USB_DM and USB_DP on the left edge
+  - id: secure_element_fan
+    relation: visible_track_fan
+    feature: F-U1
+    package_sides: [right, bottom]
+    toward_feature: F-PASSIVES
+    limit: tracks disappear under parts or at round lands; no U1-to-U2 net identified
+  - id: metal_can_area
+    relation: visible_tracks
+    feature: F-METAL-CAN
+    toward_feature: F-U2
+    toward_package_side: top
+    limit: resonator identity is source-attributed; individual pads and frequency unverified
+  - id: antenna_perimeter
+    relation: source_attributed_function
+    feature: R-KEYRING-PERIMETER
+    function: NFC antenna routing near keyring hole
+    source: https://web.archive.org/web/20170926081041/http://www.hexview.com/~scl/neo/
+    limit: neither antenna terminal nor A7005 pad identified
+conditional_pin_geometry:
+  feature: F-U2
+  evidence: conditional_inference
+  assumptions:
+    - package is the LPC11U24 HVQFN33 identified by NXP and NinjaLab
+    - visible dot near the upper-right package corner marks terminal 1
+    - datasheet top-view pin map is rotated clockwise 90 degrees to match the photo
+  source: https://www.nxp.com/docs/en/data-sheet/LPC11U2X.pdf
+  candidates:
+    - {pin: 9, function: PIO0_3/USB_VBUS, photo_side: left, approximate_pad_px: [557, 247]}
+    - {pin: 13, function: USB_DM, photo_side: left, approximate_pad_px: [557, 294]}
+    - {pin: 14, function: USB_DP, photo_side: left, approximate_pad_px: [557, 305]}
+    - {pin: 4, function: XTALIN, photo_side: top, approximate_pad_px: [626, 224]}
+    - {pin: 5, function: XTALOUT, photo_side: top, approximate_pad_px: [615, 224]}
+  limit: candidate pad positions only; no pad-to-track or contact-to-pin net established
+unresolved:
+  - USB contact order by VBUS, D-, D+, and GND on this photographed board
+  - whether each R-L land is a plated via and which F-L land is its opposite-face endpoint
+  - front-to-reverse image registration
+  - USB-derived voltage conversion, supply rails, decoupling, and ground return
+  - any F-U1 to F-U2 electrical net or inter-chip protocol
+  - NFC antenna terminals and their route to F-U1
+  - touch-disc net and its destination
+  - LED and resonator pad-to-pin routes
+  - PCB layer count, hidden routing, and pin 1 orientation for each package
