@@ -525,8 +525,34 @@ bytes), while the D1-supplied key (`0x11` bytes) did not decrypt it. This moves
 the simulator evidence beyond key-object inspection: the wrong key affects
 response encryption in the public applet source. Both keys and the admin PIN in
 this test were simulator-only fixtures. It does not establish behavior of the
-installed NEO applet or show that an attacker can interpose an APDU during a
-real administrator's provisioning session.
+installed NEO applet or exposure in any real client's SM session.
+
+The preceding bytes need not be attacker-supplied in the simulator. A normal,
+unauthenticated `GET DATA 006E` returned more than 32 public bytes. After PW3
+verification and a 16-byte D1 write, the encryption-key object held bytes
+16–31 of that public response; those bytes were nonzero and differed from the
+supplied D1 key. The intervening eight-byte VERIFY and 16-byte D1 payloads did
+not replace that part of the shared buffer in this test. This gives a
+potential confidentiality failure if a real applet behaves the same way and a
+client later uses SM while that publicly derived encryption key is active.
+Whether a real provisioning sequence leaves such public bytes in place is
+unverified.
+
+The [`F4` SM key container](https://www.gnupg.org/ftp/specs/OpenPGP-smart-card-application-2.1.pdf)
+has a separate deterministic version of the offset error in the simulator. In
+this source's 16-byte key layout, for
+`D1 10 <16 ENC bytes> D2 10 <16 MAC bytes>`, the encryption setter loads the
+16 bytes beginning at the `D2` tag, namely `D2 10` plus the first 14 MAC-key
+bytes, rather than the supplied ENC key. The MAC setter loads the intended MAC
+key. This confirms a key-field mix-up in the public source; it does not show a
+useful attack on a physical NEO.
+
+A scan of GnuPG's current `scd` source at
+[`35549cea`](https://github.com/gpg/gnupg/tree/35549cea95638d87e1c6f2b25fe1ce6395d52d58/scd)
+found [admin-gated D1/D2 setters](https://github.com/gpg/gnupg/blob/35549cea95638d87e1c6f2b25fe1ce6395d52d58/scd/app-openpgp.c#L3150)
+and SM capability reporting, but no OpenPGP SM command-wrapping path. Keyroost's
+OpenPGP client likewise has no SM implementation. This is a source-scan limit
+on ordinary-client exposure, not evidence that no other client uses SM.
 
 The source creates the APDU buffer with `JCSystem.CLEAR_ON_DESELECT` and the DES
 keys with `KeyBuilder.TYPE_DES_TRANSIENT_DESELECT`. [Oracle's Java Card API](https://docs.oracle.com/en/java/javacard/3.1/jc_api_srvc/api_classic/javacard/framework/JCSystem.html)
@@ -537,14 +563,15 @@ test is excluded from the passing count because it conflicts with the Java
 Card lifetime contract and cannot establish what the NEO does across sessions.
 
 **Next test without opening:** on an unopened *disposable* NEO, set test-only
-OpenPGP credentials, authenticate PW3, provision a test SM encryption key, and
-compare a known SM response against the supplied key and the predicted buffer
-tail. Keep all APDUs in one controlled card session, then reselect and check
-whether the effect disappears. This would distinguish a real-device key
-misassignment from a simulator-only artifact. A real-device security claim also
-needs a plausible way for an adversary to influence the preceding APDU in an
-administrator's provisioning session and a concrete confidentiality or
-integrity consequence. No such test was run on the connected key.
+OpenPGP credentials, read public `006E`, authenticate PW3, provision test D1
+and D2 keys, and compare a known SM response against the supplied D1 key and
+the public-response bytes at positions 16–31. Keep the sequence in one selected
+applet session, then reselect and check whether the effect disappears. Test the
+`F4` container separately with distinct test keys. This would distinguish
+real-device key misassignment from a simulator-only artifact. A security claim
+also needs evidence that a client uses SM and that an observer can recover data
+the client intended to keep confidential. No such test was run on the connected
+key.
 
 ### Controller debug pin targets (data sheet only)
 
