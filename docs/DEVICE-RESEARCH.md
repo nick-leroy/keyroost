@@ -491,14 +491,13 @@ repository and are not part of its test suite.
 | [Sign, decipher and authenticate](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L622) | Each private-key operation checks `pw1.isValidated()` and its required mode. The existing tests cover wrong/missing mode; additional simulator probes found no bypass after a failed PW1 check, card reset, or PW1 replacement. | This is a source/simulator result, not a claim about every command sequence or the installed binary. |
 | [Admin operations](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L963) | Key generation, PUT DATA, key import and retry-setting have PW3 checks; tested unauthorized calls were denied in the simulator. | Continue checking edge cases inside authenticated key import and reset paths. |
 | [Command chaining](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L429) | The intermediate-header check rejects a mismatch only when **both** INS and P1/P2 differ. A simulated chain with the same INS but changed P1/P2 was accepted; the final unauthorized PUT DATA was still denied by PW3. | A protocol-validation discrepancy is reproduced; no privilege bypass or security impact is established. |
-| [Secure-messaging encryption key](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPSecureMessaging.java#L167) | `PUT DATA D1` passes the start of the supplied key to `setSessionKeyEncryption`, but that method loads `offset + 16`; the `F4` container path also calls this setter. In JCardSim an admin-authorized 16-byte D1 write returned `9000`, while inspection of the simulator's encryption-key object found 16 zero bytes from the fresh buffer tail, rather than the supplied bytes. A separate direct-method test confirmed it loads the **second** 16 bytes when two distinct 16-byte blocks are present. | This is a reproducible public-source candidate, not a verified flaw on this physical NEO. Assess actual secure-messaging behavior and impact on a disposable NEO before making a device-vulnerability claim. |
+| [Secure-messaging encryption key](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPSecureMessaging.java#L167) | `PUT DATA D1` passes the start of the supplied key to `setSessionKeyEncryption`, but that method loads `offset + 16`; the `F4` container path also calls this setter. JCardSim tests loaded the second 16 bytes. The connected NEO subsequently produced a protected response decryptable with bytes 16–31 of an earlier public `006E` response, but not with the supplied D1 key. | The D1 key-offset behavior is confirmed on this physical NEO. No PIN bypass, firmware read, real-client exposure, or cross-session persistence has been demonstrated. |
 
 A read-only `GET DATA 006E` on the connected NEO returned `9000`; its extended
 capabilities advertised secure messaging (`C0` first byte `F0`, algorithm byte
 `00`, interpreted using the [OpenPGP Card 2.0 specification](https://gnupg.org/ftp/specs/openpgp-card-2.0.pdf)).
-That confirms the feature is advertised by this key, but does not prove
-that its implementation contains the public-source key-offset behavior. No
-admin PIN, SM key write, or credential operation was attempted on the key.
+That confirmed the feature was advertised by this key, before the later
+authenticated hardware test described below.
 
 ### No-open follow-up for the secure-messaging key offset
 
@@ -535,8 +534,7 @@ supplied D1 key. The intervening eight-byte VERIFY and 16-byte D1 payloads did
 not replace that part of the shared buffer in this test. This gives a
 potential confidentiality failure if a real applet behaves the same way and a
 client later uses SM while that publicly derived encryption key is active.
-Whether a real provisioning sequence leaves such public bytes in place is
-unverified.
+The later hardware test below reproduced this sequence on the connected NEO.
 
 The [`F4` SM key container](https://www.gnupg.org/ftp/specs/OpenPGP-smart-card-application-2.1.pdf)
 has a separate deterministic version of the offset error in the simulator. In
@@ -570,23 +568,45 @@ unexpectedly retained the buffer after simulated reset and applet switch; that
 test is excluded from the passing count because it conflicts with the Java
 Card lifetime contract and cannot establish what the NEO does across sessions.
 
-**Next test without opening:** on an unopened *disposable* NEO, set test-only
-OpenPGP credentials, read public `006E`, authenticate PW3, provision test D1
-and D2 keys, and compare a known SM response against the supplied D1 key and
-the public-response bytes at positions 16–31. Keep the sequence in one selected
-applet session, then reselect and check whether the effect disappears. Test the
-`F4` container separately with distinct test keys. This would distinguish
-real-device key misassignment from a simulator-only artifact. A security claim
-also needs evidence that a client uses SM and that an observer can recover data
-the client intended to keep confidential. No such test was run on the connected
-key.
+### Authenticated hardware follow-up (2026-10-29)
+
+After the user authorized provisioning this NEO, they entered [Yubico's
+documented factory PW3](https://developers.yubico.com/PGP/) in a hidden macOS
+prompt. `VERIFY PW3` returned `9000`;
+the PIN was not placed in command arguments, captured in the research record,
+or echoed in terminal output. The connected applet reports version `01 00 11`,
+matching the public 1.0.17 source version, though this does not prove binary
+identity.
+
+In one selected applet session, a public `GET DATA 006E` preceded an
+authenticated `PUT DATA D1` with distinct 16-byte test ENC key `11..20` and
+`PUT DATA D2` with test MAC key `31..40`. Both writes returned `9000`. An
+eight-byte `GET CHALLENGE` set the SM send-sequence counter, and a correctly
+MACed protected `GET DATA 004F` returned `9000` with a 24-byte ciphertext. Its
+response MAC verified under the supplied D2 key. Decryption recovered the
+plain `004F` response using bytes 16–31 of the earlier public `006E` response;
+decryption with the supplied D1 key did not. This is direct evidence that this
+physical NEO used the public-buffer bytes as its SM response-encryption key in
+the tested sequence.
+
+The probe then submitted all-zero 16-byte D1 and D2 values to clear the test
+session keys; both commands returned `9000`. `GET DATA C4` still reported
+PW1/reset-code/PW3 retries `(3, 3, 3)`. No OpenPGP credential was generated,
+imported, reset, or deleted. Preexisting transient SM key values, if any,
+could not be recovered before the test. The test does not establish that a real
+client uses this provisioning sequence, that sensitive traffic was exposed,
+that the keys survive applet deselection, or that `F4` behaves the same way on
+hardware. Those are distinct follow-ups. The result gives neither a PIN bypass
+nor a controller or secure-element firmware read path.
 
 ### Retry counters and memory-safety audit (2026-10-29)
 
 The user subsequently authorized testing or provisioning the connected NEO,
-while preferring to preserve its contents. Its Admin PW3 is unknown. This pass
-used read-only status commands and one malformed secure-messaging command on
-the physical key. It made **no PIN guesses, applet reset, key write, or import**.
+while preferring to preserve its contents. At the start of this pass, its Admin
+PW3 was unknown. The initial pass used read-only status commands and one
+malformed secure-messaging command on the physical key. It made **no PIN
+guesses, applet reset, key write, or import**; the authenticated follow-up above
+occurred afterward.
 `GET DATA C4` reported three tries each for PW1, the resetting code, and PW3.
 The three OpenPGP fingerprint slots were zero and public-key read requests
 returned `6F00`; this suggests no keys but does not prove the applet is empty.
