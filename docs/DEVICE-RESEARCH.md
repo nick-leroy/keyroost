@@ -666,6 +666,26 @@ which is documented for YubiKey 5.3 and later. The factory PIV PIN and
 management key are documented defaults, but whether this unit still uses them
 has not been tested.
 
+### Read-only OATH authentication check (2026-10-29)
+
+Selecting the NEO's OATH applet returned `9000` with a well-formed response
+and no `0x74` challenge TLV. Under [Yubico's OATH protocol](https://developers.yubico.com/OATH/YKOATH_Protocol.html),
+the challenge is returned when an authentication code is configured. This
+indicates that no OATH application password is set in the observed session.
+No account-list or code-calculation command was sent, so whether the applet
+contains any OATH credentials remains unknown. If credentials are present,
+the lack of an application password would let anyone who can access this key
+through an enabled interface request their codes; this is a configuration
+exposure, not a demonstrated applet bug.
+
+### Read-only OTP slot status (2026-10-29)
+
+`ykinfo -1 -2` reported the first keyboard OTP slot programmed and the second
+slot empty. This does not identify the first slot's credential type, reveal
+its secret, or indicate whether its configuration is protected by an [OTP
+access code](https://docs.yubico.com/yesdk/users-manual/application-otp/how-to-slot-access-codes.html).
+No OTP was generated and no slot was reconfigured.
+
 ### Retry counters and memory-safety audit (2026-10-29)
 
 The user subsequently authorized testing or provisioning the connected NEO,
