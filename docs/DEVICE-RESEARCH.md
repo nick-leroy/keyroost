@@ -619,10 +619,10 @@ read path.
 **Next security questions, in order:** (1) inspect actual OpenPGP SM clients
 and provisioning sequences for D1/F4 use, then reproduce a sensitive-response
 case on a throwaway credential if one exists; (2) measure key and buffer
-lifetime across applet deselection and power loss; (3) assess whether the
-malformed-length exceptions or partially completed RSA imports affect
-integrity or availability on a spare key. The current evidence does not make
-an out-of-bounds exception into arbitrary memory access or a firmware dump.
+lifetime across applet deselection and power loss; (3) test the simulated
+partial RSA-import corruption on a spare NEO with no valuable key material.
+The current evidence does not make an out-of-bounds exception into arbitrary
+memory access or a firmware dump.
 
 ### What the OpenPGP admin PIN reveals
 
@@ -633,7 +633,8 @@ management access, not an export command for private keys or firmware. It does
 not authenticate the NEO's PIV, OTP, or U2F applications.
 For this model, [PIV has separate factory PIN, PUK, and management-key
 values](https://developers.yubico.com/PIV/Introduction/YubiKey_and_PIV.html);
-none was tried on this key. [OATH can have a user-set validation
+the PIN and management key were later verified below, but the PUK was not tried.
+[OATH can have a user-set validation
 code](https://developers.yubico.com/OATH/YKOATH_Protocol.html), and [OTP slots
 can have individual configuration access
 codes](https://docs.yubico.com/yesdk/users-manual/application-otp/how-to-slot-access-codes.html).
@@ -665,15 +666,27 @@ object (`7E`) returned `9000`. The [object IDs and read access
 rules](https://docs.yubico.com/yesdk/users-manual/application-piv/commands.html)
 come from Yubico's PIV documentation.
 
-No PIV PIN, PUK, or management-key authentication was attempted, so these
-reads did not spend PIN retries. No certificate, CHUID, serial, or other
-response payload was printed or saved. The missing certificates and data
+During this initial inventory, no PIV PIN, PUK, or management-key
+authentication was attempted, so these reads did not spend PIN retries. No
+certificate, CHUID, serial, or other response payload was printed or saved.
+The missing certificates and data
 objects are consistent with an unprovisioned PIV applet. They cannot prove
 private-key slots are empty: the NEO predates Yubico's [per-slot metadata
 command](https://docs.yubico.com/yesdk/users-manual/application-piv/commands.html),
-which is documented for YubiKey 5.3 and later. The factory PIV PIN and
-management key are documented defaults, but whether this unit still uses them
-has not been tested.
+which is documented for YubiKey 5.3 and later.
+
+A subsequent no-write check queried the PIV PIN retry status (`63C3`, three
+remaining), then the user entered [Yubico's documented factory PIV
+PIN](https://developers.yubico.com/PIV/Introduction/YubiKey_and_PIV.html)
+through a hidden macOS prompt. One `VERIFY` returned `9000`; a retry query
+still returned `63C3`. A separate mutual-authentication exchange using
+Yubico's documented factory PIV management key returned `9000`, and the
+host verified the card's challenge response. Thus both factory credentials
+remain active on this NEO. No PIN was placed in command arguments or logs; no
+PIV write, private-key operation, PUK check, or certificate read was performed
+in this follow-up. The result grants PIV administration to anyone who has the device
+and the public factory management key, though no populated certificate slots
+were found.
 
 ### Read-only OATH authentication check (2026-10-29)
 
@@ -681,11 +694,13 @@ Selecting the NEO's OATH applet returned `9000` with a well-formed response
 and no `0x74` challenge TLV. Under [Yubico's OATH protocol](https://developers.yubico.com/OATH/YKOATH_Protocol.html),
 the challenge is returned when an authentication code is configured. This
 indicates that no OATH application password is set in the observed session.
-No account-list or code-calculation command was sent, so whether the applet
-contains any OATH credentials remains unknown. If credentials are present,
-the lack of an application password would let anyone who can access this key
-through an enabled interface request their codes; this is a configuration
-exposure, not a demonstrated applet bug.
+A subsequent read-only `LIST` returned `9000` and parsed as **two TOTP
+credentials**. Their names, identifiers, and raw response were not printed or
+saved; no code was generated. With no OATH validation code configured, this
+applet permits credential listing and, per the protocol, code calculation
+without applet-password validation for someone who can access an enabled
+interface. This is a confirmed configuration exposure, not evidence of an
+applet bug or extracted secret material.
 
 ### Read-only OTP slot status (2026-10-29)
 
@@ -693,7 +708,15 @@ exposure, not a demonstrated applet bug.
 slot empty. This does not identify the first slot's credential type, reveal
 its secret, or indicate whether its configuration is protected by an [OTP
 access code](https://docs.yubico.com/yesdk/users-manual/application-otp/how-to-slot-access-codes.html).
-No OTP was generated and no slot was reconfigured.
+Yubico's [read-only slot status](https://docs.yubico.com/yesdk/users-manual/application-otp/how-to-retrieve-slot-status.html)
+does not report access-code state, and the [slot configuration is not
+readable](https://docs.yubico.com/yesdk/users-manual/application-otp/how-to-update-slot-settings.html).
+A swap would fail whether slot 1 had an access code or not because [slot 2 is
+empty](https://docs.yubico.com/yesdk/users-manual/application-otp/how-to-swap-slot-configs.html).
+An update could reset unknown flags or the code, while the factory OTP secret
+cannot be recovered after replacement. The supported conclusion is that slot
+1's access-code state remains unknown without a potentially modifying
+operation. No OTP was generated and no slot was reconfigured.
 
 ### Retry counters and memory-safety audit (2026-10-29)
 
@@ -712,7 +735,7 @@ returned `6F00`; this suggests no keys but does not prove the applet is empty.
 | [VERIFY and retry state](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L491) | In JCardSim, a short PW3 request did not spend a try; a wrong, valid-length PIN moved the counter from 3 to 2, which persisted after simulator reset; the correct test PIN restored 3. A chained VERIFY's intermediate `9000` did not authorize; its failing final segment spent one try. | No wrong PIN was submitted to the NEO. [Java Card `OwnerPIN.check`](https://docs.oracle.com/en/java/javacard/3.1/jc_api_srvc/api_classic/javacard/framework/OwnerPIN.html) requires failed checks to decrement outside transactions. |
 | Counter reset paths | A wrong old PW3 in `CHANGE REFERENCE DATA` spent one simulator try. Unauthenticated `RESET RETRY COUNTER` and vendor `F2 SET RETRIES` did not restore it. A configured resetting code had a separate counter that persisted across simulator reset. | `TERMINATE DF` plus `ACTIVATE FILE` can restore counters after PW1 and PW3 are blocked, but wipes the OpenPGP applet; it does not allow unlimited guesses against retained keys. |
 | [SM length and integer wrap](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPSecureMessaging.java#L196) | Forged `DO87` length `0x7FFF` wraps a `short` cursor to a negative index. An instrumented simulator subclass caught `ArrayIndexOutOfBoundsException`; the original simulator returned `6F00` and stayed responsive. After `GET CHALLENGE`, the real NEO returned `6F00` to `0C CA 00 4F 05 87 82 7F FF 01`, then answered `GET DATA C4` with all tries still at 3. | The physical `6F00` does not identify its internal exception. [Java Card VM bounds checks](https://docs.oracle.com/en/java/javacard/3.1/jc-vm-spec/F12650_05.pdf) prevent treating the source-level indexing error as an arbitrary memory read or write. |
-| [Key-import BER length](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L1172) | A forged template length `0x7FFF` also triggered an instrumented array-bounds exception. The simulated applet remained responsive. | Import requires PW3; it was not exercised on hardware. Sequential RSA component setters are outside a transaction, so partial key state after a later error remains an open integrity question. |
+| [Key-import BER length](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L1172) | A forged template length `0x7FFF` triggered an instrumented array-bounds exception. Two further admin-authorized simulator probes showed that a malformed import can change an existing public exponent or private CRT component before a later length error. The applet remained responsive. | This is a non-atomic key-integrity defect in the source/simulator, not a physical NEO result. Import requires PW3. A hardware probe could corrupt a possibly populated key slot, so it was not run on this key. No private-key extraction was demonstrated. |
 | Short key fields and stale memory | Admin-authorized simulator `PUT DATA D1` accepted tested lengths 0, 1, 15, 16, 17, 31 and 32; `F4` accepted one- and two-byte bodies. Neither validates the complete key field before using the shared buffer. The key-offset tests above show the resulting stale-byte behavior. | This is an input-validation and state-use defect in the applet source, not evidence of a native heap overflow. |
 | Chaining and maximum buffer | A 1,216-byte chained certificate write succeeded in the simulator; its 1,221-byte TLV response completed through `GET RESPONSE`. A 1,217-byte write was rejected. | This checks the documented certificate and shared-buffer boundary, not every APDU sequence. |
 | Heap, stack, and object lifetime | The three Java classes use bounded arrays, have no attacker-controlled recursion or manual free, and request Java Card object deletion only on reset/retry changes. [The API](https://docs.oracle.com/en/java/javacard/3.1/jc_api_srvc/api_classic/javacard/framework/JCSystem.html) reclaims only unreferenced objects. No use-after-free or double-free path was identified in this applet source. | The NEO's Java Card runtime, secure-element internals, and LPC controller firmware are outside this source audit. Their memory safety cannot be inferred from the applet. |
@@ -722,6 +745,22 @@ remains ignored because JCardSim 2.2.2 disagreed with the Java Card
 `CLEAR_ON_DESELECT` contract. Structured malformed-length probes returned
 errors while the simulated applet stayed responsive. This is bounded coverage,
 not a claim that all malformed APDUs or hardware faults have been exhausted.
+
+Two additional temporary JCardSim probes explored the [sequential RSA import
+setters](https://github.com/Yubico/ykneo-openpgp/blob/cdf4c830e8093b51954d0d5c60384bd4a6a4a9e4/applet/src/openpgpcard/OpenPGPApplet.java#L1172)
+after test PW3 authorization and test-key generation. One import installed a
+chosen public exponent, then faulted on an oversized `P` length; the exponent
+changed from `010001` to `010003` despite the error. Another installed a chosen
+private CRT `P` component, then faulted on an oversized `Q` length; its public
+modulus and exponent were unchanged. An instrumented applet marked both
+array-bounds exceptions with test status `6D67`; the uninstrumented applet
+would report a generic error. A status read still succeeded, and subsequent
+PW1-authorized signing returned success, but the second probe's signature
+output differed from its baseline. JCardSim produced a 257-byte post-error
+output artifact, so the precise cryptographic effect on hardware is unknown.
+A simple factor-recovery check found no private-key factor. These probes ran
+only in the simulator; neither was sent to the connected NEO because it could
+damage an existing key slot even if its fingerprint is zero.
 
 ### Controller debug pin targets (data sheet only)
 
